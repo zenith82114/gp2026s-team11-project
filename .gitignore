@@ -1,0 +1,22 @@
+# Build outputs
+build/
+
+# CMake intermediates
+out/
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+build.ninja
+.ninja_deps
+.ninja_log
+.cmake/
+
+# Visual Studio
+.vs/
+*.vcxproj.user
+*.slnx/
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
