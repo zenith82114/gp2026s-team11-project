@@ -44,6 +44,7 @@ bool firstMouse = true;
 // timing
 float deltaTime = 1.0f / 60.0f;	// time between current frame and last frame
 float lastFrame = 0.0f;
+const int MAX_FRAME_COUNT_WITHOUT_MOVE = 256;
 int frameCountWithoutMove = 0;
 
 // Optional accumulation targets for Figure 1(h).
@@ -207,25 +208,27 @@ int main()
                 zoomBefore = camera.Zoom;
             }
 
-            rayTracingShader.setInt("frameCountWithoutMove", frameCountWithoutMove);
-
+            bool accumulating = frameCountWithoutMove < MAX_FRAME_COUNT_WITHOUT_MOVE;
             int accumCurr = frameCountWithoutMove % 2;
-            int accumPrev = 1 - accumCurr;
 
-            // Optional Figure 1(h) path:
-            // Pass 1 writes the current frame to an offscreen accumulation target.
-            glBindFramebuffer(GL_FRAMEBUFFER, accumFBO);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, accumTex[accumCurr], 0);
-            glViewport(0, 0, framebufferWidth, framebufferHeight);
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            rayTracingShader.setInt("displayOnly", 0);
-            // glActiveTexture(GL_TEXTURE0);
-            // glBindTexture(GL_TEXTURE_CUBE_MAP, skyboxTexture.textureID);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, accumTex[accumPrev]);
-            glBindVertexArray(quad->ID);
-            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            if (accumulating) {
+                rayTracingShader.setInt("frameCountWithoutMove", frameCountWithoutMove);
+
+                // Optional Figure 1(h) path:
+                // Pass 1 writes the current frame to an offscreen accumulation target.
+                glBindFramebuffer(GL_FRAMEBUFFER, accumFBO);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, accumTex[accumCurr], 0);
+                glViewport(0, 0, framebufferWidth, framebufferHeight);
+                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                rayTracingShader.setInt("displayOnly", 0);
+                // glActiveTexture(GL_TEXTURE0);
+                // glBindTexture(GL_TEXTURE_CUBE_MAP, skyboxTexture.textureID);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, accumTex[1 - accumCurr]);
+                glBindVertexArray(quad->ID);
+                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            }
 
             // Pass 2 displays the accumulation target on the default framebuffer.
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -234,11 +237,12 @@ int main()
             glClear(GL_COLOR_BUFFER_BIT);
             rayTracingShader.setInt("displayOnly", 1);
             glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, accumTex[accumCurr]);
+            int displayTex = accumulating ? accumCurr : (frameCountWithoutMove - 1) % 2;
+            glBindTexture(GL_TEXTURE_2D, accumTex[displayTex]);
             glBindVertexArray(quad->ID);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
-            frameCountWithoutMove++;
+            if (accumulating) frameCountWithoutMove++;
         }
         else {
             // Default direct-render path for students who stop before Figure 1(h).
