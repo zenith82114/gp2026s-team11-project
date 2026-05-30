@@ -28,6 +28,8 @@ struct Material {
 
     // parameters for refractive
     float ior; // index of refraction
+
+    vec3 emission; // radiance emitted by the surface (black = non-emitter)
 };
 
 const int mat_diffuse = 0;
@@ -60,17 +62,17 @@ uniform Material material_inside_left;
 
 
 Sphere spheres[] = Sphere[](
-//     Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
-//     Sphere(vec3(0,0,-1), 0.5, material_sphere_middle),      // diffuse(Lambertian)
-//     Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_left),    // refractive
-//     Sphere(vec3(-1,0,-1), 0.4, material_inside_left),       // refractive
-//     Sphere(vec3(1,0,-1), 0.5, material_sphere_right)        // reflective
-
     Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
-    Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_middle),  // diffuse(Lambertian)
-    Sphere(vec3(0.01,0,-1), 0.5, material_sphere_left),     // refractive
-    Sphere(vec3(0,0,-1), 0.4, material_inside_left),        // refractive
+    Sphere(vec3(0,2,-1), 0.2, material_sphere_middle),      // diffuse(Lambertian), emitting
+    Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_left),    // refractive
+    Sphere(vec3(-1,0,-1), 0.4, material_inside_left),       // refractive
     Sphere(vec3(1,0,-1), 0.5, material_sphere_right)        // reflective
+
+    // Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
+    // Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_middle),  // diffuse(Lambertian)
+    // Sphere(vec3(0.01,0,-1), 0.5, material_sphere_left),     // refractive
+    // Sphere(vec3(0,0,-1), 0.4, material_inside_left),        // refractive
+    // Sphere(vec3(1,0,-1), 0.5, material_sphere_right)        // reflective
 );
 
 
@@ -161,7 +163,7 @@ bool trace(Ray r, out HitRecord hit){
 vec3 skyColor(Ray ray) {
     vec3 dir = normalize(ray.direction);
     float a = 0.5 * (dir.y + 1.0);
-    return (1.0 - a) * vec3(1.0) + a * vec3(0.5, 0.7, 1.0);
+    return 0.01 * ((1.0 - a) * vec3(1.0) + a * vec3(0.5, 0.7, 1.0));
 }
 
 vec3 castRay(Ray ray){
@@ -174,6 +176,11 @@ vec3 castRay(Ray ray){
         HitRecord hit;
         if (!trace(r, hit)) {
             envColor = skyColor(r);
+            break;
+        }
+
+        if (hit.mat.emission != vec3(0.0)) {
+            envColor = hit.mat.emission;
             break;
         }
 
