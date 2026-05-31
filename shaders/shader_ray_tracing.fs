@@ -6,7 +6,6 @@ in vec2 TexCoords;
 // You can change the code whatever you want
 
 const int MAX_DEPTH = 10; // maximum bounce
-vec3 colorStack[MAX_DEPTH];
 
 // Optional for Figure 1(h): accumulation support.
 uniform sampler2D accumPrev;
@@ -169,25 +168,25 @@ vec3 skyColor(Ray ray) {
 vec3 castRay(Ray ray){
     // TODO
     Ray r = ray;
-    int depth = 0;
-    vec3 envColor = vec3(0);
+    vec3 L = vec3(0);    // accumulated radiance
+    vec3 beta = vec3(1); // path throughput (product of albedos so far)
 
     for (int i = 0; i < MAX_DEPTH; i++) {
         HitRecord hit;
         if (!trace(r, hit)) {
-            envColor = skyColor(r);
+            L += beta * skyColor(r);
             break;
         }
 
         if (hit.mat.emission != vec3(0.0)) {
-            envColor = hit.mat.emission;
+            L += beta * hit.mat.emission;
             break;
         }
 
         if (hit.mat.material_type == mat_diffuse) {
             vec2 seed = hit.p.xy + hit.p.zz + vec2(float(i)) + 0.131 * float(frameCountWithoutMove);
             vec3 dir = normalize(hit.normal + rand_unit_vec3(seed));
-            colorStack[depth++] = hit.mat.albedo;
+            beta *= hit.mat.albedo;
             r = Ray(hit.p + bias * hit.normal, dir);
         }
         else if (hit.mat.material_type == mat_reflective) {
@@ -195,10 +194,9 @@ vec3 castRay(Ray ray){
             vec2 seed = hit.p.xy + hit.p.zz + vec2(float(i) + 0.5) + 13.37 * float(frameCountWithoutMove);
             vec3 dir = normalize(reflected + hit.mat.fuzz * rand_unit_vec3(seed));
             if (dot(dir, hit.normal) <= 0.0) {
-                envColor = vec3(0);
-                break;
+                break; // ray absorbed below surface; contributes no radiance
             }
-            colorStack[depth++] = hit.mat.albedo;
+            beta *= hit.mat.albedo;
             r = Ray(hit.p + bias * hit.normal, dir);
         }
         else { // refractive
@@ -217,16 +215,12 @@ vec3 castRay(Ray ray){
                 dir = refract(r.direction, hit.normal, iorRatio);
                 offsetN = -hit.normal;
             }
-            colorStack[depth++] = hit.mat.albedo;
+            beta *= hit.mat.albedo;
             r = Ray(hit.p + bias * offsetN, dir);
         }
     }
 
-    vec3 color = envColor;
-    for (int i = depth - 1; i >= 0; i--) {
-        color *= colorStack[i];
-    }
-    return color;
+    return L;
 }
 
 void main()
