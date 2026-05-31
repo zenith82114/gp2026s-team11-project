@@ -184,6 +184,10 @@ int main()
     rayTracingShader.setFloat("material_sphere_right.fuzz", 1.0f);
     rayTracingShader.setVec3("material_sphere_right.emission", glm::vec3(0.0f));
 
+    rayTracingShader.setVec3("material_sphere_diffuse.albedo", glm::vec3(0.7, 0.2, 0.2));
+    rayTracingShader.setInt("material_sphere_diffuse.material_type", 0); // diffuse
+    rayTracingShader.setVec3("material_sphere_diffuse.emission", glm::vec3(0.0f));
+
     glm::mat4 viewMatBefore = camera.GetViewMatrix();
     float zoomBefore = camera.Zoom;
 

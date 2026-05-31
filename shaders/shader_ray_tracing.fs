@@ -58,6 +58,7 @@ uniform Material material_sphere_middle;
 uniform Material material_sphere_left;
 uniform Material material_sphere_right;
 uniform Material material_inside_left;
+uniform Material material_sphere_diffuse;
 
 
 Sphere spheres[] = Sphere[](
@@ -65,7 +66,8 @@ Sphere spheres[] = Sphere[](
     Sphere(vec3(0,2,-1), 0.2, material_sphere_middle),      // diffuse(Lambertian), emitting
     Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_left),    // refractive
     Sphere(vec3(-1,0,-1), 0.4, material_inside_left),       // refractive
-    Sphere(vec3(1,0,-1), 0.5, material_sphere_right)        // reflective
+    Sphere(vec3(1,0,-1), 0.5, material_sphere_right),       // reflective
+    Sphere(vec3(-0.2,0,0), 0.5, material_sphere_diffuse)    // diffuse(Lambertian), occluder
 
     // Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
     // Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_middle),  // diffuse(Lambertian)
