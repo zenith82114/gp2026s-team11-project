@@ -1,5 +1,6 @@
 # Build outputs
 build/
+imgui.ini
 
 # CMake intermediates
 out/

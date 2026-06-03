@@ -6,16 +6,22 @@
 #include <glm/glm.hpp>
 #include <glm/gtx/transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
 #include "shader.h"
 #include "opengl_utils.h"
 #include <iostream>
+#include <string>
 #include <vector>
 #include "camera.h"
 #include "texture.h"
 #include "texture_cube.h"
 #include "model.h"
 #include "mesh.h"
+#ifdef HAS_FREEIMAGE
 #include "FreeImage.h"
+#endif
 #include <time.h>
 
 void framebuffer_size_callback(GLFWwindow* window, int width, int height);
@@ -24,9 +30,15 @@ void scroll_callback(GLFWwindow* window, double xoffset, double yoffset);
 void processInput(GLFWwindow* window);
 void initAccumTargets(int width, int height);
 void resizeAccumTargets(int width, int height);
+void updatePanelMode(GLFWwindow* window);
+void uploadDisneyMaterials(Shader& shader);
+bool drawMaterialPanel();
 
 bool isWindowed = true;
 bool isKeyboardDone[1024] = { 0 };
+bool showMaterialPanel = false;
+bool prevShowMaterialPanel = false;
+int selectedEditableMaterial = 0;
 
 // setting
 const unsigned int SCR_WIDTH = 800;
@@ -50,10 +62,51 @@ int frameCountWithoutMove = 0;
 unsigned int accumFBO = 0;
 unsigned int accumTex[2] = { 0, 0 };
 
+struct DisneyMaterialParams {
+    glm::vec3 baseColor;
+    float roughness;
+    float metallic;
+    float specular;
+    float specularTint;
+    float transmission;
+    float ior;
+    float sheen;
+    float sheenTint;
+    float clearcoat;
+    float clearcoatGloss;
+};
+
+const int MATERIAL_COUNT = 5;
+const int EDITABLE_MATERIAL_OFFSET = 1;
+const int EDITABLE_MATERIAL_COUNT = MATERIAL_COUNT - EDITABLE_MATERIAL_OFFSET;
+const char* materialLabels[MATERIAL_COUNT] = {
+    "Ground",
+    "Left Diffuse Sphere",
+    "Center Glass Outer",
+    "Center Glass Inner",
+    "Right Metal Sphere"
+};
+const char* materialUniforms[MATERIAL_COUNT] = {
+    "material_ground",
+    "material_sphere_middle",
+    "material_sphere_left",
+    "material_inside_left",
+    "material_sphere_right"
+};
+const DisneyMaterialParams initialDisneyMaterials[MATERIAL_COUNT] = {
+    { glm::vec3(0.8f, 0.8f, 0.0f), 0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f },
+    { glm::vec3(0.3f, 0.3f, 0.8f), 0.55f, 0.0f, 0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f },
+    { glm::vec3(0.8f, 0.8f, 0.8f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f },
+    { glm::vec3(0.9f, 0.9f, 1.0f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 0.667f, 0.0f, 0.5f, 0.0f, 0.5f },
+    { glm::vec3(0.8f, 0.6f, 0.2f), 0.22f, 1.0f, 0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.2f, 0.6f }
+};
+DisneyMaterialParams disneyMaterials[MATERIAL_COUNT];
+
 // Save Image to png file. press V key.
 // file name : date.png (created in bin folder)
 // Install FreeImage to use this function. (dlls, includes, lib)
 void saveImage(const char* filename) {
+#ifdef HAS_FREEIMAGE
     // Make the BYTE array, factor of 3 because it's RBG.
     int width = framebufferWidth;
     int height = framebufferHeight;
@@ -67,10 +120,17 @@ void saveImage(const char* filename) {
     // Free resources
     FreeImage_Unload(image);
     delete[] pixels;
+#else
+    std::cout << "FreeImage 없음: " << filename << " 저장 생략" << std::endl;
+#endif
 }
 
 int main()
 {
+    for (int i = 0; i < MATERIAL_COUNT; i++) {
+        disneyMaterials[i] = initialDisneyMaterials[i];
+    }
+
     // glfw: initialize and configure
     // ------------------------------
     glfwInit();
@@ -107,6 +167,12 @@ int main()
         std::cout << "Failed to initialize GLAD" << std::endl;
         return -1;
     }
+
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+    ImGui::StyleColorsDark();
+    ImGui_ImplGlfw_InitForOpenGL(window, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
 
     glfwGetFramebufferSize(window, &framebufferWidth, &framebufferHeight);
 
@@ -157,32 +223,32 @@ int main()
     rayTracingShader.setInt("frameCountWithoutMove", 0);
 
 
-    // Set materials. You can change this.
-    rayTracingShader.setVec3("material_ground.albedo", glm::vec3(0.8, 0.8, 0.0));
-    rayTracingShader.setInt("material_ground.material_type", 0); // diffuse
-
-    rayTracingShader.setVec3("material_sphere_middle.albedo", glm::vec3(0.3, 0.3, 0.8));
-    rayTracingShader.setInt("material_sphere_middle.material_type", 0); // diffuse
-
-    rayTracingShader.setVec3("material_sphere_left.albedo", glm::vec3(0.8, 0.8, 0.8));
-    rayTracingShader.setInt("material_sphere_left.material_type", 2); // refractive
-    rayTracingShader.setFloat("material_sphere_left.ior", 1.5f);
-    rayTracingShader.setFloat("material_sphere_left.fuzz", 0.3f);
-
-    rayTracingShader.setVec3("material_inside_left.albedo", glm::vec3(0.9, 0.9, 1.0));
-    rayTracingShader.setInt("material_inside_left.material_type", 2); // refractive
-    rayTracingShader.setFloat("material_inside_left.ior", 1.0f / 1.5f);
-    rayTracingShader.setFloat("material_inside_left.fuzz", 0.3f);
-
-    rayTracingShader.setVec3("material_sphere_right.albedo", glm::vec3(0.8, 0.6, 0.2));
-    rayTracingShader.setInt("material_sphere_right.material_type", 1); // reflective
-    rayTracingShader.setFloat("material_sphere_right.fuzz", 1.0f);
+    uploadDisneyMaterials(rayTracingShader);
 
     glm::mat4 viewMatBefore = camera.GetViewMatrix();
     float zoomBefore = camera.Zoom;
 
     while (!glfwWindowShouldClose(window))// render loop
     {
+        float currentFrame = static_cast<float>(glfwGetTime());
+        deltaTime = currentFrame - lastFrame;
+        lastFrame = currentFrame;
+
+        glfwPollEvents();
+        processInput(window);
+
+        ImGui_ImplOpenGL3_NewFrame();
+        ImGui_ImplGlfw_NewFrame();
+        ImGui::NewFrame();
+        bool materialChanged = drawMaterialPanel();
+        updatePanelMode(window);
+
+        if (materialChanged) {
+            rayTracingShader.use();
+            uploadDisneyMaterials(rayTracingShader);
+            frameCountWithoutMove = 0;
+        }
+
         rayTracingShader.use();
         rayTracingShader.setFloat("H", framebufferHeight);
         rayTracingShader.setFloat("W", framebufferWidth);
@@ -252,13 +318,12 @@ int main()
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
         }
 
-        // input
-        processInput(window);
+        ImGui::Render();
+        ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
 
         // glfw: swap buffers and poll IO events (keys pressed/released, mouse moved etc.)
         // -------------------------------------------------------------------------------
         glfwSwapBuffers(window);
-        glfwPollEvents();
     }
 
     // optional: de-allocate all resources once they've outlived their purpose:
@@ -270,6 +335,9 @@ int main()
 
     // glfw: terminate, clearing all previously allocated GLFW resources.
     // ------------------------------------------------------------------
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
     glfwTerminate();
     return 0;
 }
@@ -284,12 +352,93 @@ void setToggle(GLFWwindow* window, unsigned int key, bool *value) {
     }
 }
 
+void updatePanelMode(GLFWwindow* window) {
+    if (showMaterialPanel == prevShowMaterialPanel) {
+        return;
+    }
+
+    glfwSetInputMode(window, GLFW_CURSOR, showMaterialPanel ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
+    firstMouse = true;
+    prevShowMaterialPanel = showMaterialPanel;
+}
+
+void uploadDisneyMaterial(Shader& shader, const char* uniformName, const DisneyMaterialParams& mat) {
+    std::string name(uniformName);
+    shader.setInt(name + ".material_type", 0);
+    shader.setVec3(name + ".albedo", mat.baseColor);
+    shader.setVec3(name + ".baseColor", mat.baseColor);
+    shader.setFloat(name + ".roughness", mat.roughness);
+    shader.setFloat(name + ".metallic", mat.metallic);
+    shader.setFloat(name + ".specular", mat.specular);
+    shader.setFloat(name + ".specularTint", mat.specularTint);
+    shader.setFloat(name + ".transmission", mat.transmission);
+    shader.setFloat(name + ".ior", mat.ior);
+    shader.setFloat(name + ".sheen", mat.sheen);
+    shader.setFloat(name + ".sheenTint", mat.sheenTint);
+    shader.setFloat(name + ".clearcoat", mat.clearcoat);
+    shader.setFloat(name + ".clearcoatGloss", mat.clearcoatGloss);
+    shader.setFloat(name + ".fuzz", mat.roughness);
+}
+
+void uploadDisneyMaterials(Shader& shader) {
+    for (int i = 0; i < MATERIAL_COUNT; i++) {
+        uploadDisneyMaterial(shader, materialUniforms[i], disneyMaterials[i]);
+    }
+}
+
+bool drawMaterialPanel() {
+    if (!showMaterialPanel) {
+        return false;
+    }
+
+    bool changed = false;
+    ImGui::SetNextWindowSize(ImVec2(360.0f, 0.0f), ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Disney BSDF", &showMaterialPanel)) {
+        ImGui::Combo("Material", &selectedEditableMaterial, materialLabels + EDITABLE_MATERIAL_OFFSET, EDITABLE_MATERIAL_COUNT);
+
+        int materialIndex = selectedEditableMaterial + EDITABLE_MATERIAL_OFFSET;
+        DisneyMaterialParams& mat = disneyMaterials[materialIndex];
+        changed |= ImGui::ColorEdit3("Base Color", &mat.baseColor[0]);
+        changed |= ImGui::SliderFloat("Roughness", &mat.roughness, 0.001f, 1.0f);
+        changed |= ImGui::SliderFloat("Metallic", &mat.metallic, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Specular", &mat.specular, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Specular Tint", &mat.specularTint, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Transmission", &mat.transmission, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("IOR", &mat.ior, 0.2f, 2.5f);
+        changed |= ImGui::SliderFloat("Sheen", &mat.sheen, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Sheen Tint", &mat.sheenTint, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Clearcoat", &mat.clearcoat, 0.0f, 1.0f);
+        changed |= ImGui::SliderFloat("Clearcoat Gloss", &mat.clearcoatGloss, 0.0f, 1.0f);
+
+        if (ImGui::Button("Reset Material")) {
+            mat = initialDisneyMaterials[materialIndex];
+            changed = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset All")) {
+            for (int i = EDITABLE_MATERIAL_OFFSET; i < MATERIAL_COUNT; i++) {
+                disneyMaterials[i] = initialDisneyMaterials[i];
+            }
+            changed = true;
+        }
+        ImGui::Text("M: toggle panel");
+    }
+    ImGui::End();
+    return changed;
+}
+
 // process all input: query GLFW whether relevant keys are pressed/released this frame and react accordingly
 // ---------------------------------------------------------------------------------------------------------
 void processInput(GLFWwindow* window)
 {
     if (glfwGetKey(window, GLFW_KEY_ESCAPE) == GLFW_PRESS)
         glfwSetWindowShouldClose(window, true);
+
+    setToggle(window, GLFW_KEY_M, &showMaterialPanel);
+    updatePanelMode(window);
+    if (showMaterialPanel) {
+        return;
+    }
 
     if (glfwGetKey(window, GLFW_KEY_W) == GLFW_PRESS)
         camera.ProcessKeyboard(FORWARD, deltaTime);
@@ -309,7 +458,7 @@ void processInput(GLFWwindow* window)
         time_t t = time(NULL);
         struct tm tm = *localtime(&t);
         char date_char[128];
-        sprintf(date_char, "%d_%d_%d_%d_%d_%d.png", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
+        snprintf(date_char, sizeof(date_char), "%d_%d_%d_%d_%d_%d.png", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec);
         saveImage(date_char);
         isKeyboardDone[GLFW_KEY_V] = true;
     }
@@ -338,6 +487,10 @@ void framebuffer_size_callback(GLFWwindow* window, int width, int height)
 // -------------------------------------------------------
 void mouse_callback(GLFWwindow* window, double xpos, double ypos)
 {
+    if (showMaterialPanel) {
+        return;
+    }
+
     if (firstMouse)
     {
         lastX = xpos;
@@ -358,6 +511,10 @@ void mouse_callback(GLFWwindow* window, double xpos, double ypos)
 // ----------------------------------------------------------------------
 void scroll_callback(GLFWwindow* window, double xoffset, double yoffset)
 {
+    if (showMaterialPanel) {
+        return;
+    }
+
     camera.ProcessMouseScroll(yoffset);
 }
 
