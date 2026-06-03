@@ -170,18 +170,18 @@ int main()
     rayTracingShader.setVec3("material_sphere_left.albedo", glm::vec3(0.8, 0.8, 0.8));
     rayTracingShader.setInt("material_sphere_left.material_type", 2); // refractive
     rayTracingShader.setFloat("material_sphere_left.ior", 1.5f);
-    rayTracingShader.setFloat("material_sphere_left.fuzz", 0.3f);
+    rayTracingShader.setFloat("material_sphere_left.fuzz", 0.1f);
     rayTracingShader.setVec3("material_sphere_left.emission", glm::vec3(0.0f));
 
     rayTracingShader.setVec3("material_inside_left.albedo", glm::vec3(0.9, 0.9, 1.0));
     rayTracingShader.setInt("material_inside_left.material_type", 2); // refractive
     rayTracingShader.setFloat("material_inside_left.ior", 1.0f / 1.5f);
-    rayTracingShader.setFloat("material_inside_left.fuzz", 0.3f);
+    rayTracingShader.setFloat("material_inside_left.fuzz", 0.1f);
     rayTracingShader.setVec3("material_inside_left.emission", glm::vec3(0.0f));
 
     rayTracingShader.setVec3("material_sphere_right.albedo", glm::vec3(0.8, 0.6, 0.2));
     rayTracingShader.setInt("material_sphere_right.material_type", 1); // reflective
-    rayTracingShader.setFloat("material_sphere_right.fuzz", 1.0f);
+    rayTracingShader.setFloat("material_sphere_right.fuzz", 0.15f);
     rayTracingShader.setVec3("material_sphere_right.emission", glm::vec3(0.0f));
 
     rayTracingShader.setVec3("material_sphere_diffuse.albedo", glm::vec3(0.7, 0.2, 0.2));

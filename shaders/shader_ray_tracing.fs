@@ -73,8 +73,8 @@ uniform Material material_sphere_diffuse;
 Sphere spheres[] = Sphere[](
     Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
     Sphere(vec3(0,2,-1), 0.2, material_sphere_middle),      // diffuse(Lambertian), emitting
-    Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_left),    // refractive
-    Sphere(vec3(-1,0,-1), 0.4, material_inside_left),       // refractive
+    Sphere(vec3(-1,0,-1), 0.5, material_sphere_left),       // refractive
+    Sphere(vec3(-1,0,-1), 0.45, material_inside_left),      // refractive
     Sphere(vec3(1,0,-1), 0.5, material_sphere_right),       // reflective
     Sphere(vec3(-0.2,0,0), 0.5, material_sphere_diffuse)    // diffuse(Lambertian), occluder
 
@@ -257,6 +257,22 @@ vec3 skyColor(Ray ray) {
     return 0.01 * ((1.0 - a) * vec3(1.0) + a * vec3(0.5, 0.7, 1.0));
 }
 
+// Power heuristic (beta = 2) for two single-sample strategies (PBRT eq. 14.10 / Veach).
+// Returns the MIS weight for strategy `a` given the two pdfs of the *same* direction.
+float powerHeuristic(float pa, float pb) {
+    float a2 = pa * pa;
+    float b2 = pb * pb;
+    float denom = a2 + b2;
+    return denom > 0.0 ? a2 / denom : 0.0;
+}
+
+// pdf of the diffuse (cosine-weighted Lambertian) BSDF sampler for direction `wi`.
+// The RTIOW sampler `normalize(n + rand_unit_vec3())` is cosine-distributed, so p = cosθ/π.
+float diffuseBsdfPdf(vec3 n, vec3 wi) {
+    float c = dot(n, wi);
+    return c > 0.0 ? c / PI : 0.0;
+}
+
 // Next-event estimation at a diffuse hit:
 // deterministically connect to every emissive sphere via a cone sample + occlusion-only shadow ray,
 // and accumulate the direct radiance.
@@ -274,9 +290,9 @@ vec3 directLight(HitRecord hit, int bounce) {
                   + 0.197 * float(frameCountWithoutMove);
 
         vec3 wi;
-        float dist, pdf;
-        sampleSphereLight(light, hit.p, seed, wi, dist, pdf);
-        if (pdf <= 0.0) continue;
+        float dist, pdfLight;
+        sampleSphereLight(light, hit.p, seed, wi, dist, pdfLight);
+        if (pdfLight <= 0.0) continue;
 
         float cosSurf = dot(hit.normal, wi);
         if (cosSurf <= 0.0) continue; // light is below the surface horizon
@@ -284,7 +300,15 @@ vec3 directLight(HitRecord hit, int bounce) {
         vec3 origin = hit.p + bias * hit.normal;
         if (occluded(origin, wi, dist, i)) continue; // shadowed (i = light being sampled)
 
-        Ld += f * light.mat.emission * cosSurf / pdf; // we don't need extra 1/dist^2 or light-cosine term
+        // MIS power-heuristic weight for the light-sampling strategy
+        // The competing strategy is BSDF sampling, whose pdf for this same direction is cosθ/π
+        float misW = 1.0;
+        if (RENDER_MODE == mode_full) {
+            float pdfBsdf = diffuseBsdfPdf(hit.normal, wi);
+            misW = powerHeuristic(pdfLight, pdfBsdf);
+        }
+
+        Ld += misW * f * light.mat.emission * cosSurf / pdfLight; // no extra 1/dist^2 or light-cosine term
     }
     return Ld;
 }
@@ -297,6 +321,9 @@ vec3 castRay(Ray ray){
 
     bool lastBounceWasDelta = true; // including primary camera ray
 
+    vec3 prevDiffuseP = vec3(0.0);
+    vec3 prevDiffuseN = vec3(0.0);
+
     for (int i = 0; i < MAX_DEPTH; i++) {
         HitRecord hit;
         if (!trace(r, hit)) {
@@ -306,15 +333,28 @@ vec3 castRay(Ray ray){
 
         if (hit.mat.emission != vec3(0.0)) {
             // A BSDF ray landed on an emitter.
-            // BSDF-only: always add emission (no NEE exists to cover it).
-            // NEE/MIS modes: add emission only when NEE could NOT have accounted for it,
-            // i.e. the ray arrived via the primary ray or a delta (mirror/glass) bounce.
-            // If it arrived from a diffuse bounce,
-            // directLight() already added the direct contribution at that surface,
-            // so skip it here to avoid double-counting.
             if (RENDER_MODE == mode_bsdf_only || lastBounceWasDelta) {
+                // BSDF-only: no NEE exists, always add
+                // Delta bounce / primary ray: NEE can't connect across these,
+                // so the BSDF ray is the only carrier of this emission; add it in full
                 L += beta * hit.mat.emission;
+            } else if (RENDER_MODE == mode_full) {
+                // Arrived from a diffuse bounce:
+                // directLight() at the previous (diffuse) surface also tried to reach this emitter
+                // so MIS-weight against light pdf to avoid double-counting
+                float pdfLight = 0.0;
+                for (int li = 0; li < spheres.length(); li++) {
+                    if (spheres[li].mat.emission == vec3(0.0)) continue;
+                    float surfErr = abs(length(hit.p - spheres[li].center) - spheres[li].radius);
+                    if (surfErr > 1e-3) continue; // not the sphere we actually hit
+                    pdfLight = spherePdfLight(spheres[li], prevDiffuseP, r.direction);
+                    break;
+                }
+                float pdfBsdf = diffuseBsdfPdf(prevDiffuseN, r.direction);
+                float wBsdf = powerHeuristic(pdfBsdf, pdfLight);
+                L += wBsdf * beta * hit.mat.emission;
             }
+            // NEE-only never reaches here (it breaks after the direct estimate).
             break;
         }
 
@@ -331,6 +371,8 @@ vec3 castRay(Ray ray){
             beta *= hit.mat.albedo;
             r = Ray(hit.p + bias * hit.normal, dir);
             lastBounceWasDelta = false; // diffuse bounce: NEE handles direct light from here
+            prevDiffuseP = hit.p;       // saved for MIS weight calculation
+            prevDiffuseN = hit.normal;
         }
         else if (hit.mat.material_type == mat_reflective) {
             vec3 reflected = reflect(normalize(r.direction), hit.normal);
