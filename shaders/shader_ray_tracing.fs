@@ -11,7 +11,7 @@ const int MAX_DEPTH = 10; // maximum bounce
 //   0: BSDF-only      — original path tracer, lit only by BSDF rays hitting
 //   1: NEE-only       — direct estimate at the first diffuse hit, then terminate
 //   2: full (NEE+MIS) — direct estimate at every diffuse hit AND keep bouncing
-const int RENDER_MODE = 0;
+const int RENDER_MODE = 2;
 const int mode_bsdf_only = 0;
 const int mode_nee_only  = 1;
 const int mode_full      = 2;
@@ -295,6 +295,8 @@ vec3 castRay(Ray ray){
     vec3 L = vec3(0);    // accumulated radiance
     vec3 beta = vec3(1); // path throughput (product of albedos so far)
 
+    bool lastBounceWasDelta = true; // including primary camera ray
+
     for (int i = 0; i < MAX_DEPTH; i++) {
         HitRecord hit;
         if (!trace(r, hit)) {
@@ -303,11 +305,14 @@ vec3 castRay(Ray ray){
         }
 
         if (hit.mat.emission != vec3(0.0)) {
-            // A BSDF ray landed on an emitter
-            // When NEE is on, the direct light is already accounted for by directLight();
-            // re-adding it here double-counts
-            // Gated off for now; TODO later
-            if (RENDER_MODE == mode_bsdf_only) {
+            // A BSDF ray landed on an emitter.
+            // BSDF-only: always add emission (no NEE exists to cover it).
+            // NEE/MIS modes: add emission only when NEE could NOT have accounted for it,
+            // i.e. the ray arrived via the primary ray or a delta (mirror/glass) bounce.
+            // If it arrived from a diffuse bounce,
+            // directLight() already added the direct contribution at that surface,
+            // so skip it here to avoid double-counting.
+            if (RENDER_MODE == mode_bsdf_only || lastBounceWasDelta) {
                 L += beta * hit.mat.emission;
             }
             break;
@@ -325,6 +330,7 @@ vec3 castRay(Ray ray){
             vec3 dir = normalize(hit.normal + rand_unit_vec3(seed));
             beta *= hit.mat.albedo;
             r = Ray(hit.p + bias * hit.normal, dir);
+            lastBounceWasDelta = false; // diffuse bounce: NEE handles direct light from here
         }
         else if (hit.mat.material_type == mat_reflective) {
             vec3 reflected = reflect(normalize(r.direction), hit.normal);
@@ -335,6 +341,7 @@ vec3 castRay(Ray ray){
             }
             beta *= hit.mat.albedo;
             r = Ray(hit.p + bias * hit.normal, dir);
+            lastBounceWasDelta = true; // delta surface: BSDF ray must carry emission it hits
         }
         else { // refractive
             // assume one of the two adjacent media is always air (IOR = 1)
@@ -354,6 +361,7 @@ vec3 castRay(Ray ray){
             }
             beta *= hit.mat.albedo;
             r = Ray(hit.p + bias * offsetN, dir);
+            lastBounceWasDelta = true; // delta surface: BSDF ray must carry emission it hits
         }
     }
 
