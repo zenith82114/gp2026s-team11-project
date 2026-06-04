@@ -44,8 +44,12 @@ bool firstMouse = true;
 // timing
 float deltaTime = 1.0f / 60.0f;	// time between current frame and last frame
 float lastFrame = 0.0f;
-const int MAX_FRAME_COUNT_WITHOUT_MOVE = 256;
+const int MAX_FRAME_COUNT_WITHOUT_MOVE = 4;
 int frameCountWithoutMove = 0;
+
+// render mode, switched at runtime with keys 0/1/2
+// 0: BSDF-only, 1: NEE-only, 2: NEE+MIS
+int renderMode = 2;
 
 // Optional accumulation targets for Figure 1(h).
 unsigned int accumFBO = 0;
@@ -200,6 +204,7 @@ int main()
         rayTracingShader.setVec3("cameraPosition", camera.Position);
         glm::mat4 viewMatNow = camera.GetViewMatrix();
         rayTracingShader.setMat3("cameraToWorldRotMatrix", glm::transpose(glm::mat3(viewMatNow)));
+        rayTracingShader.setInt("RENDER_MODE", renderMode);
 
         if (ENABLE_ACCUMULATION) {
             int fbW, fbH;
@@ -316,6 +321,25 @@ void processInput(GLFWwindow* window)
     if (glfwGetKey(window, GLFW_KEY_K) == GLFW_PRESS) {
         std::cout << "Position" << camera.Position.x << "," << camera.Position.y << "," << camera.Position.z << std::endl;
         std::cout << "Yaw" << camera.Yaw << std::endl;
+    }
+
+    // Render-mode switch (0: BSDF-only, 1: NEE-only, 2: NEE+MIS)
+    // Changing mode resets accumulation so the image re-converges from scratch
+    const int modeKeys[3] = { GLFW_KEY_0, GLFW_KEY_1, GLFW_KEY_2 };
+    for (int m = 0; m < 3; m++) {
+        int key = modeKeys[m];
+        if (glfwGetKey(window, key) == GLFW_PRESS && !isKeyboardDone[key]) {
+            if (renderMode != m) {
+                renderMode = m;
+                frameCountWithoutMove = 0;
+                const char* names[3] = { "BSDF-only", "NEE-only", "NEE+MIS" };
+                std::cout << "Render mode: " << m << " (" << names[m] << ")" << std::endl;
+            }
+            isKeyboardDone[key] = true;
+        }
+        if (glfwGetKey(window, key) == GLFW_RELEASE) {
+            isKeyboardDone[key] = false;
+        }
     }
 
     if (glfwGetKey(window, GLFW_KEY_V) == GLFW_PRESS && isKeyboardDone[GLFW_KEY_V] == false) {

@@ -7,11 +7,11 @@ in vec2 TexCoords;
 
 const int MAX_DEPTH = 10; // maximum bounce
 
-// Render mode selector for NEE/MIS validation
+// Render mode selector for NEE/MIS validation (set at runtime from main.cpp; keys 0/1/2)
 //   0: BSDF-only      — original path tracer, lit only by BSDF rays hitting
 //   1: NEE-only       — direct estimate at the first diffuse hit, then terminate
 //   2: full (NEE+MIS) — direct estimate at every diffuse hit AND keep bouncing
-const int RENDER_MODE = 2;
+uniform int RENDER_MODE;
 const int mode_bsdf_only = 0;
 const int mode_nee_only  = 1;
 const int mode_full      = 2;
