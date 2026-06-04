@@ -69,21 +69,38 @@ uniform Material material_sphere_right;
 uniform Material material_inside_left;
 uniform Material material_sphere_diffuse;
 
+// Active validation scene, driven by `const int SCENE` in main.cpp.
+//   0: small distant emitter  — NEE wins
+//   1: large close emitter    — MIS wins
+uniform int SCENE;
+const int scene_small_emitter = 0;
+const int scene_large_emitter = 1;
 
-Sphere spheres[] = Sphere[](
-    Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
-    Sphere(vec3(0,2,-1), 0.2, material_sphere_middle),      // diffuse(Lambertian), emitting
-    Sphere(vec3(-1,0,-1), 0.5, material_sphere_left),       // refractive
-    Sphere(vec3(-1,0,-1), 0.45, material_inside_left),      // refractive
-    Sphere(vec3(1,0,-1), 0.5, material_sphere_right),       // reflective
-    Sphere(vec3(-0.2,0,0), 0.5, material_sphere_diffuse)    // diffuse(Lambertian), occluder
+const int NUM_SPHERES = 6;
+Sphere spheres[NUM_SPHERES];
 
-    // Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
-    // Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_middle),  // diffuse(Lambertian)
-    // Sphere(vec3(0.01,0,-1), 0.5, material_sphere_left),     // refractive
-    // Sphere(vec3(0,0,-1), 0.4, material_inside_left),        // refractive
-    // Sphere(vec3(1,0,-1), 0.5, material_sphere_right)        // reflective
-);
+// Populate the global `spheres[]` for the active SCENE. Call once before tracing.
+// Slot-to-material mapping is kept identical across scenes so main.cpp can reuse the same uniform names;
+// only centers/radii (and the chosen materials) differ.
+void setupScene() {
+    if (SCENE == scene_large_emitter) {
+        // Large emitter close to the diffuse + metal spheres, subtending a wide cone.
+        spheres[0] = Sphere(vec3(0,-100.5,-1), 100,  material_ground);         // ground, diffuse
+        spheres[1] = Sphere(vec3(-0.9,1.1,-1.2), 0.9, material_sphere_middle); // BIG emitter, close
+        spheres[2] = Sphere(vec3(-1.4,0,-0.2), 0.5, material_sphere_left);     // glass
+        spheres[3] = Sphere(vec3(-1.4,0,-0.2), 0.45, material_inside_left);    // glass bubble
+        spheres[4] = Sphere(vec3(1,0,-1), 0.5, material_sphere_right);         // near-mirror metal
+        spheres[5] = Sphere(vec3(0.1,0,-0.2), 0.5, material_sphere_diffuse);   // diffuse, lit by emitter
+    } else {
+        // Original small/distant emitter scene.
+        spheres[0] = Sphere(vec3(0,-100.5,-1), 100, material_ground);          // diffuse(Lambertian)
+        spheres[1] = Sphere(vec3(0,2,-1), 0.2, material_sphere_middle);        // small emitter
+        spheres[2] = Sphere(vec3(-1,0,-1), 0.5, material_sphere_left);         // refractive
+        spheres[3] = Sphere(vec3(-1,0,-1), 0.45, material_inside_left);        // refractive
+        spheres[4] = Sphere(vec3(1,0,-1), 0.5, material_sphere_right);         // reflective
+        spheres[5] = Sphere(vec3(-0.2,0,0), 0.5, material_sphere_diffuse);     // diffuse occluder
+    }
+}
 
 
 // Math functions
@@ -417,6 +434,8 @@ void main()
         FragColor = vec4(pow(c, vec3(1.0 / 2.2)), 1.0);     // gamma correction
         return;
     }
+
+    setupScene(); // fill spheres[] for the active SCENE before any tracing
 
     // TODO
     const int nsamples = 8;

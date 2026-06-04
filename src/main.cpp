@@ -51,6 +51,13 @@ int frameCountWithoutMove = 0;
 // 0: BSDF-only, 1: NEE-only, 2: NEE+MIS
 int renderMode = 2;
 
+// validation scene ID (compile-time; rebuild to switch)
+//   0: small distant emitter — NEE wins
+//   1: large close emitter   — MIS wins
+const int SCENE = 1;
+const int SCENE_SMALL_EMITTER = 0;
+const int SCENE_LARGE_EMITTER = 1;
+
 // Optional accumulation targets for Figure 1(h).
 unsigned int accumFBO = 0;
 unsigned int accumTex[2] = { 0, 0 };
@@ -162,35 +169,66 @@ int main()
     rayTracingShader.setInt("frameCountWithoutMove", 0);
 
 
-    // Set materials. You can change this.
+    rayTracingShader.setInt("SCENE", SCENE);
+
+    // Ground is shared by both scenes (yellow diffuse floor)
     rayTracingShader.setVec3("material_ground.albedo", glm::vec3(0.8, 0.8, 0.0));
     rayTracingShader.setInt("material_ground.material_type", 0); // diffuse
     rayTracingShader.setVec3("material_ground.emission", glm::vec3(0.0f));
 
-    rayTracingShader.setVec3("material_sphere_middle.albedo", glm::vec3(0.3, 0.3, 0.8));
-    rayTracingShader.setInt("material_sphere_middle.material_type", 0); // diffuse
-    rayTracingShader.setVec3("material_sphere_middle.emission", glm::vec3(4.0f, 4.0f, 4.0f)); // emitter
+    if (SCENE == SCENE_LARGE_EMITTER) {
+        rayTracingShader.setVec3("material_sphere_middle.albedo", glm::vec3(0.0f));
+        rayTracingShader.setInt("material_sphere_middle.material_type", 0); // diffuse
+        rayTracingShader.setVec3("material_sphere_middle.emission", glm::vec3(2.0f, 1.9f, 1.6f)); // big emitter
 
-    rayTracingShader.setVec3("material_sphere_left.albedo", glm::vec3(0.8, 0.8, 0.8));
-    rayTracingShader.setInt("material_sphere_left.material_type", 2); // refractive
-    rayTracingShader.setFloat("material_sphere_left.ior", 1.5f);
-    rayTracingShader.setFloat("material_sphere_left.fuzz", 0.1f);
-    rayTracingShader.setVec3("material_sphere_left.emission", glm::vec3(0.0f));
+        rayTracingShader.setVec3("material_sphere_left.albedo", glm::vec3(0.9, 0.9, 0.9));
+        rayTracingShader.setInt("material_sphere_left.material_type", 2); // refractive
+        rayTracingShader.setFloat("material_sphere_left.ior", 1.5f);
+        rayTracingShader.setFloat("material_sphere_left.fuzz", 0.0f);
+        rayTracingShader.setVec3("material_sphere_left.emission", glm::vec3(0.0f));
 
-    rayTracingShader.setVec3("material_inside_left.albedo", glm::vec3(0.9, 0.9, 1.0));
-    rayTracingShader.setInt("material_inside_left.material_type", 2); // refractive
-    rayTracingShader.setFloat("material_inside_left.ior", 1.0f / 1.5f);
-    rayTracingShader.setFloat("material_inside_left.fuzz", 0.1f);
-    rayTracingShader.setVec3("material_inside_left.emission", glm::vec3(0.0f));
+        rayTracingShader.setVec3("material_inside_left.albedo", glm::vec3(0.9, 0.9, 1.0));
+        rayTracingShader.setInt("material_inside_left.material_type", 2); // refractive
+        rayTracingShader.setFloat("material_inside_left.ior", 1.0f / 1.5f);
+        rayTracingShader.setFloat("material_inside_left.fuzz", 0.0f);
+        rayTracingShader.setVec3("material_inside_left.emission", glm::vec3(0.0f));
 
-    rayTracingShader.setVec3("material_sphere_right.albedo", glm::vec3(0.8, 0.6, 0.2));
-    rayTracingShader.setInt("material_sphere_right.material_type", 1); // reflective
-    rayTracingShader.setFloat("material_sphere_right.fuzz", 0.15f);
-    rayTracingShader.setVec3("material_sphere_right.emission", glm::vec3(0.0f));
+        rayTracingShader.setVec3("material_sphere_right.albedo", glm::vec3(0.95, 0.95, 0.95));
+        rayTracingShader.setInt("material_sphere_right.material_type", 1); // reflective (near-mirror)
+        rayTracingShader.setFloat("material_sphere_right.fuzz", 0.02f);
+        rayTracingShader.setVec3("material_sphere_right.emission", glm::vec3(0.0f));
 
-    rayTracingShader.setVec3("material_sphere_diffuse.albedo", glm::vec3(0.7, 0.2, 0.2));
-    rayTracingShader.setInt("material_sphere_diffuse.material_type", 0); // diffuse
-    rayTracingShader.setVec3("material_sphere_diffuse.emission", glm::vec3(0.0f));
+        rayTracingShader.setVec3("material_sphere_diffuse.albedo", glm::vec3(0.7, 0.2, 0.2));
+        rayTracingShader.setInt("material_sphere_diffuse.material_type", 0); // diffuse
+        rayTracingShader.setVec3("material_sphere_diffuse.emission", glm::vec3(0.0f));
+    }
+    else {
+        // Original small/distant-emitter scene (NEE wins).
+        rayTracingShader.setVec3("material_sphere_middle.albedo", glm::vec3(0.3, 0.3, 0.8));
+        rayTracingShader.setInt("material_sphere_middle.material_type", 0); // diffuse
+        rayTracingShader.setVec3("material_sphere_middle.emission", glm::vec3(4.0f, 4.0f, 4.0f)); // emitter
+
+        rayTracingShader.setVec3("material_sphere_left.albedo", glm::vec3(0.8, 0.8, 0.8));
+        rayTracingShader.setInt("material_sphere_left.material_type", 2); // refractive
+        rayTracingShader.setFloat("material_sphere_left.ior", 1.5f);
+        rayTracingShader.setFloat("material_sphere_left.fuzz", 0.1f);
+        rayTracingShader.setVec3("material_sphere_left.emission", glm::vec3(0.0f));
+
+        rayTracingShader.setVec3("material_inside_left.albedo", glm::vec3(0.9, 0.9, 1.0));
+        rayTracingShader.setInt("material_inside_left.material_type", 2); // refractive
+        rayTracingShader.setFloat("material_inside_left.ior", 1.0f / 1.5f);
+        rayTracingShader.setFloat("material_inside_left.fuzz", 0.1f);
+        rayTracingShader.setVec3("material_inside_left.emission", glm::vec3(0.0f));
+
+        rayTracingShader.setVec3("material_sphere_right.albedo", glm::vec3(0.8, 0.6, 0.2));
+        rayTracingShader.setInt("material_sphere_right.material_type", 1); // reflective
+        rayTracingShader.setFloat("material_sphere_right.fuzz", 0.15f);
+        rayTracingShader.setVec3("material_sphere_right.emission", glm::vec3(0.0f));
+
+        rayTracingShader.setVec3("material_sphere_diffuse.albedo", glm::vec3(0.7, 0.2, 0.2));
+        rayTracingShader.setInt("material_sphere_diffuse.material_type", 0); // diffuse
+        rayTracingShader.setVec3("material_sphere_diffuse.emission", glm::vec3(0.0f));
+    }
 
     glm::mat4 viewMatBefore = camera.GetViewMatrix();
     float zoomBefore = camera.Zoom;
