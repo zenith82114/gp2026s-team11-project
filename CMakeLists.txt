@@ -26,6 +26,10 @@ link_directories(${PROJECT_ORIGIN}/lib)
 
 if(WIN32)
   set(LIBS glfw3 opengl32 freetype assimp FreeImage)
+  # FreeImage is always linked on Windows (vendored lib/dll), so enable the
+  # saveImage() path. Without this define, src/main.cpp compiles the no-op stub
+  # and the V-key / validation screenshots are silently skipped.
+  add_definitions(-DHAS_FREEIMAGE)
   file(COPY ${PROJECT_ORIGIN}/dlls/assimp-vc140-mt.dll
      DESTINATION ${CMAKE_RUNTIME_OUTPUT_DIRECTORY})
   file(COPY ${PROJECT_ORIGIN}/dlls/FreeImage.dll

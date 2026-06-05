@@ -8,6 +8,17 @@ in vec2 TexCoords;
 const int MAX_DEPTH = 10; // maximum bounce
 const float PI = 3.14159265359;
 
+const int RAYS_PER_FRAME_PIXEL = 4;
+
+// Render mode selector for NEE/MIS validation (set at runtime from main.cpp; keys 0/1/2)
+//   0: BSDF-only      — pure path tracer, lit only by BSDF rays hitting emitters / sky
+//   1: NEE-only       — direct estimate at the first non-delta hit, then terminate
+//   2: full (NEE+MIS) — direct estimate at every non-delta hit AND keep bouncing
+uniform int RENDER_MODE;
+const int mode_bsdf_only = 0;
+const int mode_nee_only  = 1;
+const int mode_full      = 2;
+
 // Optional for Figure 1(h): accumulation support.
 uniform sampler2D accumPrev;
 uniform int frameCountWithoutMove;
@@ -34,6 +45,8 @@ struct Material {
     float clearcoat;
     float clearcoatGloss;
     float fuzz;
+
+    vec3 emission; // radiance emitted by the surface (black = non-emitter)
 };
 
 const int bsdf_diffuse = 1;
@@ -72,21 +85,40 @@ uniform Material material_sphere_middle;
 uniform Material material_sphere_left;
 uniform Material material_sphere_right;
 uniform Material material_inside_left;
+uniform Material material_sphere_diffuse;
 
+// Active validation scene, driven by `const int SCENE` in main.cpp.
+//   0: small distant emitter  — NEE wins
+//   1: large close emitter    — MIS wins
+uniform int SCENE;
+const int scene_small_emitter = 0;
+const int scene_large_emitter = 1;
 
-Sphere spheres[] = Sphere[](
-//     Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
-//     Sphere(vec3(0,0,-1), 0.5, material_sphere_middle),      // diffuse(Lambertian)
-//     Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_left),    // refractive
-//     Sphere(vec3(-1,0,-1), 0.4, material_inside_left),       // refractive
-//     Sphere(vec3(1,0,-1), 0.5, material_sphere_right)        // reflective
+const int NUM_SPHERES = 6;
+Sphere spheres[NUM_SPHERES];
 
-    Sphere(vec3(0,-100.5,-1), 100, material_ground),        // diffuse(Lambertian)
-    Sphere(vec3(-1.01,0,-1), 0.5, material_sphere_middle),  // diffuse(Lambertian)
-    Sphere(vec3(0.01,0,-1), 0.5, material_sphere_left),     // refractive
-    Sphere(vec3(0,0,-1), 0.4, material_inside_left),        // refractive
-    Sphere(vec3(1,0,-1), 0.5, material_sphere_right)        // reflective
-);
+// Populate the global `spheres[]` for the active SCENE. Call once before tracing.
+// Slot-to-material mapping is kept identical across scenes so main.cpp can reuse the same uniform names;
+// only centers/radii (and the chosen materials) differ.
+void setupScene() {
+    if (SCENE == scene_large_emitter) {
+        // Large emitter close to the diffuse + metal spheres, subtending a wide cone.
+        spheres[0] = Sphere(vec3(0,-100.5,-1), 100,  material_ground);         // ground, diffuse
+        spheres[1] = Sphere(vec3(-0.9,1.1,-1.2), 0.9, material_sphere_middle); // BIG emitter, close
+        spheres[2] = Sphere(vec3(-1.4,0,-0.2), 0.5, material_sphere_left);     // glass
+        spheres[3] = Sphere(vec3(-1.4,0,-0.2), 0.45, material_inside_left);    // glass bubble
+        spheres[4] = Sphere(vec3(1,0,-1), 0.5, material_sphere_right);         // near-mirror metal
+        spheres[5] = Sphere(vec3(0.1,0,-0.2), 0.5, material_sphere_diffuse);   // diffuse, lit by emitter
+    } else {
+        // Original small/distant emitter scene.
+        spheres[0] = Sphere(vec3(0,-100.5,-1), 100, material_ground);          // diffuse(Lambertian)
+        spheres[1] = Sphere(vec3(0,2,-1), 0.2, material_sphere_middle);        // small emitter
+        spheres[2] = Sphere(vec3(-1,0,-1), 0.5, material_sphere_left);         // refractive
+        spheres[3] = Sphere(vec3(-1,0,-1), 0.45, material_inside_left);        // refractive
+        spheres[4] = Sphere(vec3(1,0,-1), 0.5, material_sphere_right);         // reflective
+        spheres[5] = Sphere(vec3(-0.2,0,0), 0.5, material_sphere_diffuse);     // diffuse occluder
+    }
+}
 
 
 // Math functions
@@ -229,7 +261,92 @@ bool trace(Ray r, out HitRecord hit){
 vec3 skyColor(Ray ray) {
     vec3 dir = normalize(ray.direction);
     float a = 0.5 * (dir.y + 1.0);
-    return (1.0 - a) * vec3(1.0) + a * vec3(0.5, 0.7, 1.0);
+    // Dimmed so the emissive spheres dominate the lighting (NEE/MIS validation needs a dark env).
+    return 0.01 * ((1.0 - a) * vec3(1.0) + a * vec3(0.5, 0.7, 1.0));
+}
+
+// Build an orthonormal basis whose +z axis is w (Duff et al. 2017, branchless).
+void buildONB(vec3 w, out vec3 u, out vec3 v) {
+    float sign = w.z >= 0.0 ? 1.0 : -1.0;
+    float a = -1.0 / (sign + w.z);
+    float b = w.x * w.y * a;
+    u = vec3(1.0 + sign * w.x * w.x * a, sign * b, -sign * w.x);
+    v = vec3(b, sign + w.y * w.y * a, -w.y);
+}
+
+// Solid-angle pdf of sampling direction `wi` from point `p` towards sphere `sp`,
+// under the uniform-cone scheme used by sampleSphereLight().
+// Returns 0 if `wi` misses the cone subtended by the sphere, or if `p` is inside the sphere.
+// Handles arbitrary wi (not just sampled ones) so the same formula serves MIS.
+float spherePdfLight(Sphere sp, vec3 p, vec3 wi) {
+    vec3 wc = sp.center - p;
+    float dc2 = dot(wc, wc);
+    float r2 = sp.radius * sp.radius;
+    if (dc2 <= r2) return 0.0; // shading point inside the light: cone undefined
+    float cosThetaMax = sqrt(1.0 - r2 / dc2);
+    // wi must lie within the cone around the direction to the center
+    if (dot(normalize(wi), normalize(wc)) < cosThetaMax) return 0.0;
+    float solidAngle = 2.0 * PI * (1.0 - cosThetaMax);
+    return 1.0 / solidAngle;
+}
+
+// Uniformly sample a direction within the cone subtended by sphere `sp` as seen from `p`.
+// Returns the (normalized) direction in `wi`, distance to the sampled point in `dist`,
+// and the solid-angle pdf in `pdf`.
+// pdf == 0 signals an invalid sample (i.e., p inside sphere).
+void sampleSphereLight(Sphere sp, vec3 p, vec2 seed, out vec3 wi, out float dist, out float pdf) {
+    vec3 wc = sp.center - p;
+    float dc2 = dot(wc, wc);
+    float dc = sqrt(dc2);
+    float r2 = sp.radius * sp.radius;
+    if (dc2 <= r2) { pdf = 0.0; wi = vec3(0,0,1); dist = 0.0; return; }
+
+    float cosThetaMax = sqrt(1.0 - r2 / dc2);
+
+    float r1 = rand(seed);
+    float r2u = rand(seed + 2.9);
+    float cosTheta = 1.0 - r1 * (1.0 - cosThetaMax);
+    float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
+    float phi = 2.0 * PI * r2u;
+
+    vec3 w = wc / dc;
+    vec3 u, v;
+    buildONB(w, u, v);
+    wi = normalize(cos(phi) * sinTheta * u + sin(phi) * sinTheta * v + cosTheta * w);
+
+    // Solve |p + t*wi - center|^2 = r^2 for the smaller positive root
+    float b = dot(wi, -wc);
+    float disc = b * b - (dc2 - r2);
+    dist = disc > 0.0 ? (-b - sqrt(disc)) : dc; // fall back to center distance if grazing
+    if (dist <= 0.0) dist = dc;
+
+    pdf = 1.0 / (2.0 * PI * (1.0 - cosThetaMax));
+}
+
+// Occlusion-only shadow test:
+// is there any geometry strictly between `origin` and the light point at distance `maxDist` along `dir`?
+// Mirrors trace() but early-outs on any hit.
+// `lightIndex` (the light sphere being sampled) is excluded so it never spuriously shadows its own ray.
+bool occluded(vec3 origin, vec3 dir, float maxDist, int lightIndex) {
+    Ray r = Ray(origin, dir);
+    HitRecord hit;
+    hit.t = maxDist - bias; // anything at/after the light surface doesn't shadow it
+    for (int i = 0; i < spheres.length(); i++) {
+        if (i == lightIndex) continue; // skip the light itself to prevent spurious self-occlusion
+        if (sphereIntersect(spheres[i], r, hit)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Power heuristic (beta = 2) for two single-sample strategies (PBRT eq. 14.10 / Veach).
+// Returns the MIS weight for strategy `a` given the two pdfs of the *same* direction.
+float powerHeuristic(float pa, float pb) {
+    float a2 = pa * pa;
+    float b2 = pb * pb;
+    float denom = a2 + b2;
+    return denom > 0.0 ? a2 / denom : 0.0;
 }
 
 void getLobeWeights(Material mat, out float diffuseW, out float specularW, out float transmissionW, out float clearcoatW) {
@@ -383,10 +500,63 @@ BSDFSample sampleBSDF(Material mat, vec3 n, vec3 wo, bool frontFace, vec3 u) {
     return BSDFSample(normalize(wi), evalBSDF(mat, n, wo, wi), pdf, flags, true);
 }
 
+// Next-event estimation at a non-delta (diffuse/glossy) hit:
+// deterministically connect to every emissive sphere via a cone sample + occlusion-only shadow ray,
+// and accumulate the direct radiance.
+// Returns the direct-lighting contribution (NOT yet multiplied by path throughput).
+// Pure-delta lobes (transmission/specular fresnel) correctly receive zero direct estimate.
+vec3 directLight(HitRecord hit, vec3 wo, int bounce) {
+    vec3 Ld = vec3(0.0);
+
+    for (int i = 0; i < spheres.length(); i++) {
+        Sphere light = spheres[i];
+        if (light.mat.emission == vec3(0.0)) continue; // not a light
+
+        vec2 seed = hit.p.xy + hit.p.zz
+                  + vec2(float(bounce) + 7.0 * float(i) + 2.2)
+                  + 0.197 * float(frameCountWithoutMove);
+
+        vec3 wi;
+        float dist, pdfLight;
+        sampleSphereLight(light, hit.p, seed, wi, dist, pdfLight);
+        if (pdfLight <= 0.0) continue;
+
+        float cosSurf = dot(hit.normal, wi);
+        if (cosSurf <= 0.0) continue; // light is below the surface horizon
+
+        // Full Disney BSDF value for the light direction (replaces the old albedo/PI Lambertian term)
+        vec3 f = evalBSDF(hit.mat, hit.normal, wo, wi);
+        if (max3(f) <= 0.0) continue; // no reflectance toward the light (e.g. pure-delta material)
+
+        vec3 origin = hit.p + bias * hit.normal;
+        if (occluded(origin, wi, dist, i)) continue; // shadowed (i = light being sampled)
+
+        // MIS power-heuristic weight for the light-sampling strategy:
+        // The competing strategy is BSDF sampling,
+        // whose pdf for this same direction is the Disney pdfBSDF (not cos/PI)
+        float misW = 1.0;
+        if (RENDER_MODE == mode_full) {
+            float pdfBsdf = pdfBSDF(hit.mat, hit.normal, wo, wi);
+            misW = powerHeuristic(pdfLight, pdfBsdf);
+        }
+
+        Ld += misW * f * light.mat.emission * cosSurf / pdfLight;
+    }
+    return Ld;
+}
+
 vec3 castRay(Ray ray){
     Ray r = ray;
-    vec3 throughput = vec3(1.0);
-    vec3 color = vec3(0.0);
+    vec3 throughput = vec3(1.0); // path throughput (product of f*cos/pdf so far)
+    vec3 color = vec3(0.0);      // accumulated radiance L
+
+    bool lastBounceWasDelta = true; // primary camera ray behaves like a delta connection
+
+    // Previous-bounce shading info, needed to MIS-weight emission found by the BSDF ray
+    vec3 prevP = vec3(0.0);
+    vec3 prevN = vec3(0.0);
+    vec3 prevWo = vec3(0.0);
+    Material prevMat;
 
     for (int i = 0; i < MAX_DEPTH; i++) {
         HitRecord hit;
@@ -396,6 +566,45 @@ vec3 castRay(Ray ray){
         }
 
         vec3 wo = normalize(-r.direction);
+
+        // --- Emission handling (avoid double-counting against NEE) ---
+        if (hit.mat.emission != vec3(0.0)) {
+            if (RENDER_MODE == mode_bsdf_only || lastBounceWasDelta) {
+                // BSDF-only: no NEE exists, always add
+                // Delta bounce / primary ray: NEE can't connect across these,
+                // so the BSDF ray is the only carrier of this emission; add it in full
+                color += throughput * hit.mat.emission;
+            } else if (RENDER_MODE == mode_full) {
+                // Arrived from a non-delta (diffuse/glossy) bounce:
+                // directLight() at the previous surface also tried to reach this emitter,
+                // so MIS-weight against the light pdf to avoid double-counting
+                float pdfLight = 0.0;
+                for (int li = 0; li < spheres.length(); li++) {
+                    if (spheres[li].mat.emission == vec3(0.0)) continue;
+                    float surfErr = abs(length(hit.p - spheres[li].center) - spheres[li].radius);
+                    if (surfErr > 1e-3) continue; // not the sphere we actually hit
+                    pdfLight = spherePdfLight(spheres[li], prevP, r.direction);
+                    break;
+                }
+                float pdfBsdf = pdfBSDF(prevMat, prevN, prevWo, r.direction);
+                float wBsdf = powerHeuristic(pdfBsdf, pdfLight);
+                color += wBsdf * throughput * hit.mat.emission;
+            }
+            // NEE-only never reaches here (it breaks after the direct estimate)
+            break;
+        }
+
+        // --- Next event estimation at non-delta surfaces ---
+        // directLight() returns 0 for pure-delta materials (evalBSDF == 0 for generic wi),
+        // so calling it unconditionally on every hit is safe
+        if (RENDER_MODE != mode_bsdf_only) {
+            color += throughput * directLight(hit, wo, i);
+            if (RENDER_MODE == mode_nee_only) {
+                break; // NEE-only: terminate after the direct estimate
+            }
+        }
+
+        // --- BSDF sampling for the next bounce ---
         vec2 seed = hit.p.xy + hit.p.zz + vec2(float(i) + 1.7) + 9.13 * float(frameCountWithoutMove);
         vec3 u = vec3(rand(seed), rand(seed + 2.31), rand(seed + 5.97));
         BSDFSample sample = sampleBSDF(hit.mat, hit.normal, wo, hit.frontFace, u);
@@ -409,6 +618,16 @@ vec3 castRay(Ray ray){
         if (max3(throughput) <= 1e-4) {
             break;
         }
+
+        // A pure-delta lobe (transmission / specular Fresnel) was sampled iff makeDeltaSample tagged it bsdf_specular
+        // Non-delta (diffuse (bsdf_diffuse) and glossy GGX (bsdf_glossy)) were already covered by NEE above
+        lastBounceWasDelta = (sample.flags & bsdf_specular) != 0;
+
+        // Save previous-surface info for the next iteration's emitter-MIS weight
+        prevP = hit.p;
+        prevN = hit.normal;
+        prevWo = wo;
+        prevMat = hit.mat;
 
         vec3 offsetN = dot(sample.wi, hit.normal) >= 0.0 ? hit.normal : -hit.normal;
         r = Ray(hit.p + bias * offsetN, normalize(sample.wi));
@@ -425,13 +644,14 @@ void main()
         return;
     }
 
-    const int nsamples = 8;
+    setupScene(); // fill spheres[] for the active SCENE before any tracing
+
     vec3 color = vec3(0);
-    for (int i = 0; i < nsamples; i++) {
+    for (int i = 0; i < RAYS_PER_FRAME_PIXEL; i++) {
         Ray r = getRay(TexCoords, i);
         color += castRay(r);
     }
-    color /= nsamples;
+    color /= RAYS_PER_FRAME_PIXEL;
 
     // Optional for Figure 1(h)
     // Blend the current-frame color with accumPrev using frameCountWithoutMove.

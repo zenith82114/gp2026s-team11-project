@@ -56,7 +56,19 @@ bool firstMouse = true;
 // timing
 float deltaTime = 1.0f / 60.0f;	// time between current frame and last frame
 float lastFrame = 0.0f;
+const int MAX_FRAME_COUNT_WITHOUT_MOVE = 4; // cap accumulation for equal-sample experiments
 int frameCountWithoutMove = 0;
+
+// render mode, switched at runtime with keys 0/1/2
+// 0: BSDF-only, 1: NEE-only, 2: NEE+MIS
+int renderMode = 2;
+
+// validation scene ID (compile-time; rebuild to switch)
+//   0: small distant emitter — NEE wins
+//   1: large close emitter    — MIS wins
+const int SCENE = 0;
+const int SCENE_SMALL_EMITTER = 0;
+const int SCENE_LARGE_EMITTER = 1;
 
 // Optional accumulation targets for Figure 1(h).
 unsigned int accumFBO = 0;
@@ -74,32 +86,57 @@ struct DisneyMaterialParams {
     float sheenTint;
     float clearcoat;
     float clearcoatGloss;
+    glm::vec3 emission; // black = non-emitter
 };
 
-const int MATERIAL_COUNT = 5;
-const int EDITABLE_MATERIAL_OFFSET = 1;
+// Six material slots; the 6th (material_sphere_diffuse) was added by the NEE scenes.
+// Slot order matches the shader's setupScene() slot-to-uniform mapping.
+const int MATERIAL_COUNT = 6;
+const int EDITABLE_MATERIAL_OFFSET = 1; // ground (slot 0) is not user-editable
 const int EDITABLE_MATERIAL_COUNT = MATERIAL_COUNT - EDITABLE_MATERIAL_OFFSET;
 const char* materialLabels[MATERIAL_COUNT] = {
     "Ground",
-    "Left Diffuse Sphere",
-    "Center Glass Outer",
-    "Center Glass Inner",
-    "Right Metal Sphere"
+    "Emitter Sphere",
+    "Glass Outer",
+    "Glass Inner",
+    "Metal Sphere",
+    "Diffuse Sphere"
 };
 const char* materialUniforms[MATERIAL_COUNT] = {
     "material_ground",
     "material_sphere_middle",
     "material_sphere_left",
     "material_inside_left",
-    "material_sphere_right"
+    "material_sphere_right",
+    "material_sphere_diffuse"
 };
-const DisneyMaterialParams initialDisneyMaterials[MATERIAL_COUNT] = {
-    { glm::vec3(0.8f, 0.8f, 0.0f), 0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f },
-    { glm::vec3(0.3f, 0.3f, 0.8f), 0.55f, 0.0f, 0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f },
-    { glm::vec3(0.8f, 0.8f, 0.8f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f },
-    { glm::vec3(0.9f, 0.9f, 1.0f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 0.667f, 0.0f, 0.5f, 0.0f, 0.5f },
-    { glm::vec3(0.8f, 0.6f, 0.2f), 0.22f, 1.0f, 0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.2f, 0.6f }
+
+// Per-scene initial materials. Disney equivalents of the old type-based materials:
+//   metal  -> metallic=1, low roughness;  glass -> transmission=1, ior 1.5 (bubble 1/1.5).
+// Layout per row: baseColor, roughness, metallic, specular, specularTint,
+//                 transmission, ior, sheen, sheenTint, clearcoat, clearcoatGloss, emission.
+const DisneyMaterialParams initialDisneyMaterialsByScene[2][MATERIAL_COUNT] = {
+    // SCENE 0: small distant emitter (NEE wins)
+    {
+        { glm::vec3(0.8f, 0.8f, 0.0f), 0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // ground diffuse
+        { glm::vec3(0.0f),             0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(4.0f) },            // small emitter
+        { glm::vec3(0.8f, 0.8f, 0.8f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // glass
+        { glm::vec3(0.9f, 0.9f, 1.0f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 0.667f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // glass bubble (ior 1/1.5)
+        { glm::vec3(0.8f, 0.6f, 0.2f), 0.15f, 1.0f, 0.5f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.2f, 0.6f, glm::vec3(0.0f) },            // gold metal
+        { glm::vec3(0.7f, 0.2f, 0.2f), 0.6f,  0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) }             // red diffuse occluder
+    },
+    // SCENE 1: large close emitter (MIS wins)
+    {
+        { glm::vec3(0.8f, 0.8f, 0.0f), 0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // ground diffuse
+        { glm::vec3(0.0f),             0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(2.0f, 1.9f, 1.6f) },// BIG emitter, close
+        { glm::vec3(0.9f, 0.9f, 0.9f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // glass
+        { glm::vec3(0.9f, 0.9f, 1.0f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 0.667f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // glass bubble
+        { glm::vec3(0.95f, 0.95f, 0.95f), 0.02f, 1.0f, 0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.2f, 0.6f, glm::vec3(0.0f) },           // near-mirror metal
+        { glm::vec3(0.7f, 0.2f, 0.2f), 0.6f,  0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) }             // red diffuse, lit by emitter
+    }
 };
+// Active editable copy, initialized from the chosen SCENE at startup.
+const DisneyMaterialParams* initialDisneyMaterials = initialDisneyMaterialsByScene[SCENE];
 DisneyMaterialParams disneyMaterials[MATERIAL_COUNT];
 
 // Save Image to png file. press V key.
@@ -222,6 +259,7 @@ int main()
     rayTracingShader.setInt("displayOnly", 0);
     rayTracingShader.setInt("frameCountWithoutMove", 0);
 
+    rayTracingShader.setInt("SCENE", SCENE);
 
     uploadDisneyMaterials(rayTracingShader);
 
@@ -256,6 +294,7 @@ int main()
         rayTracingShader.setVec3("cameraPosition", camera.Position);
         glm::mat4 viewMatNow = camera.GetViewMatrix();
         rayTracingShader.setMat3("cameraToWorldRotMatrix", glm::transpose(glm::mat3(viewMatNow)));
+        rayTracingShader.setInt("RENDER_MODE", renderMode);
 
         if (ENABLE_ACCUMULATION) {
             int fbW, fbH;
@@ -273,25 +312,30 @@ int main()
                 zoomBefore = camera.Zoom;
             }
 
-            rayTracingShader.setInt("frameCountWithoutMove", frameCountWithoutMove);
-
+            // Once the sample cap is hit, stop tracing new samples and just keep
+            // displaying the converged result (lets equal-sample experiments settle).
+            bool accumulating = frameCountWithoutMove < MAX_FRAME_COUNT_WITHOUT_MOVE;
             int accumCurr = frameCountWithoutMove % 2;
             int accumPrev = 1 - accumCurr;
 
-            // Optional Figure 1(h) path:
-            // Pass 1 writes the current frame to an offscreen accumulation target.
-            glBindFramebuffer(GL_FRAMEBUFFER, accumFBO);
-            glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, accumTex[accumCurr], 0);
-            glViewport(0, 0, framebufferWidth, framebufferHeight);
-            glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-            glClear(GL_COLOR_BUFFER_BIT);
-            rayTracingShader.setInt("displayOnly", 0);
-            // glActiveTexture(GL_TEXTURE0);
-            // glBindTexture(GL_TEXTURE_CUBE_MAP, skyboxTexture.textureID);
-            glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, accumTex[accumPrev]);
-            glBindVertexArray(quad->ID);
-            glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            if (accumulating) {
+                rayTracingShader.setInt("frameCountWithoutMove", frameCountWithoutMove);
+
+                // Optional Figure 1(h) path:
+                // Pass 1 writes the current frame to an offscreen accumulation target.
+                glBindFramebuffer(GL_FRAMEBUFFER, accumFBO);
+                glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, accumTex[accumCurr], 0);
+                glViewport(0, 0, framebufferWidth, framebufferHeight);
+                glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                glClear(GL_COLOR_BUFFER_BIT);
+                rayTracingShader.setInt("displayOnly", 0);
+                // glActiveTexture(GL_TEXTURE0);
+                // glBindTexture(GL_TEXTURE_CUBE_MAP, skyboxTexture.textureID);
+                glActiveTexture(GL_TEXTURE1);
+                glBindTexture(GL_TEXTURE_2D, accumTex[accumPrev]);
+                glBindVertexArray(quad->ID);
+                glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
+            }
 
             // Pass 2 displays the accumulation target on the default framebuffer.
             glBindFramebuffer(GL_FRAMEBUFFER, 0);
@@ -300,11 +344,12 @@ int main()
             glClear(GL_COLOR_BUFFER_BIT);
             rayTracingShader.setInt("displayOnly", 1);
             glActiveTexture(GL_TEXTURE1);
-            glBindTexture(GL_TEXTURE_2D, accumTex[accumCurr]);
+            int displayTex = accumulating ? accumCurr : (frameCountWithoutMove - 1) % 2;
+            glBindTexture(GL_TEXTURE_2D, accumTex[displayTex]);
             glBindVertexArray(quad->ID);
             glDrawElements(GL_TRIANGLES, 6, GL_UNSIGNED_INT, 0);
 
-            frameCountWithoutMove++;
+            if (accumulating) frameCountWithoutMove++;
         }
         else {
             // Default direct-render path for students who stop before Figure 1(h).
@@ -378,6 +423,7 @@ void uploadDisneyMaterial(Shader& shader, const char* uniformName, const DisneyM
     shader.setFloat(name + ".clearcoat", mat.clearcoat);
     shader.setFloat(name + ".clearcoatGloss", mat.clearcoatGloss);
     shader.setFloat(name + ".fuzz", mat.roughness);
+    shader.setVec3(name + ".emission", mat.emission);
 }
 
 void uploadDisneyMaterials(Shader& shader) {
@@ -409,6 +455,8 @@ bool drawMaterialPanel() {
         changed |= ImGui::SliderFloat("Sheen Tint", &mat.sheenTint, 0.0f, 1.0f);
         changed |= ImGui::SliderFloat("Clearcoat", &mat.clearcoat, 0.0f, 1.0f);
         changed |= ImGui::SliderFloat("Clearcoat Gloss", &mat.clearcoatGloss, 0.0f, 1.0f);
+        // Emission can exceed 1.0 (HDR); edit color and intensity separately for usability.
+        changed |= ImGui::ColorEdit3("Emission", &mat.emission[0], ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
 
         if (ImGui::Button("Reset Material")) {
             mat = initialDisneyMaterials[materialIndex];
@@ -421,6 +469,10 @@ bool drawMaterialPanel() {
             }
             changed = true;
         }
+        ImGui::Separator();
+        const char* modeNames[3] = { "BSDF-only", "NEE-only", "NEE+MIS" };
+        ImGui::Text("Render mode: %s   (keys 0/1/2)", modeNames[renderMode]);
+        ImGui::Text("Scene: %d   (compile-time)", SCENE);
         ImGui::Text("M: toggle panel");
     }
     ImGui::End();
@@ -436,6 +488,26 @@ void processInput(GLFWwindow* window)
 
     setToggle(window, GLFW_KEY_M, &showMaterialPanel);
     updatePanelMode(window);
+
+    // Render-mode switch (0: BSDF-only, 1: NEE-only, 2: NEE+MIS).
+    // Available regardless of panel state; changing mode resets accumulation.
+    const int modeKeys[3] = { GLFW_KEY_0, GLFW_KEY_1, GLFW_KEY_2 };
+    for (int m = 0; m < 3; m++) {
+        int key = modeKeys[m];
+        if (glfwGetKey(window, key) == GLFW_PRESS && !isKeyboardDone[key]) {
+            if (renderMode != m) {
+                renderMode = m;
+                frameCountWithoutMove = 0;
+                const char* names[3] = { "BSDF-only", "NEE-only", "NEE+MIS" };
+                std::cout << "Render mode: " << m << " (" << names[m] << ")" << std::endl;
+            }
+            isKeyboardDone[key] = true;
+        }
+        if (glfwGetKey(window, key) == GLFW_RELEASE) {
+            isKeyboardDone[key] = false;
+        }
+    }
+
     if (showMaterialPanel) {
         return;
     }
