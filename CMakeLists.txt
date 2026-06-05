@@ -66,6 +66,12 @@ endif(UNIX)
 
 list(APPEND CMAKE_CXX_FLAGS "-std=c++11")
 add_executable(${NAME} ${SOURCE})
+# The vendored GLFW/glfw3native.h requires BOTH a window and a context API macro.
+# imgui's GLFW backend only defines GLFW_EXPOSE_NATIVE_WIN32, so add the WGL macro
+# here to avoid the "No context API specified" #error.
+if(WIN32)
+  target_compile_definitions(${NAME} PRIVATE GLFW_EXPOSE_NATIVE_WGL)
+endif(WIN32)
 target_link_libraries(${NAME} ${LIBS})
 include_directories(${PROJECT_ORIGIN}/includes)
 include_directories(${IMGUI_DIR})
