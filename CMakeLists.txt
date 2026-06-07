@@ -5,7 +5,7 @@ project("Final Project" C CXX)
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/build)
 set(PROJECT_ORIGIN ".")
 
-file(GLOB SOURCE
+file(GLOB SOURCE CONFIGURE_DEPENDS
     "src/*.h"
     "src/*.cpp"
 )
@@ -68,7 +68,8 @@ if(UNIX)
   include_directories(${ASSIMP_INCLUDE_DIRS})
 endif(UNIX)
 
-list(APPEND CMAKE_CXX_FLAGS "-std=c++11")
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_executable(${NAME} ${SOURCE})
 # The vendored GLFW/glfw3native.h requires BOTH a window and a context API macro.
 # imgui's GLFW backend only defines GLFW_EXPOSE_NATIVE_WIN32, so add the WGL macro

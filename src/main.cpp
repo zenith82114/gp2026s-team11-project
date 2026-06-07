@@ -10,6 +10,7 @@
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 #include "shader.h"
+#include "scene.h"
 #include "opengl_utils.h"
 #include <iostream>
 #include <string>
@@ -31,8 +32,6 @@ void processInput(GLFWwindow* window);
 void initAccumTargets(int width, int height);
 void resizeAccumTargets(int width, int height);
 void updatePanelMode(GLFWwindow* window);
-void uploadDisneyMaterials(Shader& shader);
-void uploadLadderMaterials(Shader& shader);
 bool drawMaterialPanel();
 
 bool isWindowed = true;
@@ -64,119 +63,9 @@ int frameCountWithoutMove = 0;
 // 0: BSDF-only, 1: NEE-only, 2: NEE+MIS
 int renderMode = 2;
 
-// validation scene ID (compile-time; rebuild to switch)
-//   0: small distant emitter — NEE wins
-//   1: large close emitter    — MIS wins
-//   2: roughness ladder        — both NEE/MIS and the Disney roughness sweep in one frame
-const int SCENE = 2;
-const int SCENE_SMALL_EMITTER = 0;
-const int SCENE_LARGE_EMITTER = 1;
-const int SCENE_ROUGHNESS_LADDER = 2;
-
 // Optional accumulation targets for Figure 1(h).
 unsigned int accumFBO = 0;
 unsigned int accumTex[2] = { 0, 0 };
-
-struct DisneyMaterialParams {
-    glm::vec3 baseColor;
-    float roughness;
-    float metallic;
-    float specular;
-    float specularTint;
-    float transmission;
-    float ior;
-    float sheen;
-    float sheenTint;
-    float clearcoat;
-    float clearcoatGloss;
-    glm::vec3 emission; // black = non-emitter
-};
-
-// Six material slots; the 6th (material_sphere_diffuse) was added by the NEE scenes.
-// Slot order matches the shader's setupScene() slot-to-uniform mapping.
-const int MATERIAL_COUNT = 6;
-const int EDITABLE_MATERIAL_OFFSET = 1; // ground (slot 0) is not user-editable
-const int EDITABLE_MATERIAL_COUNT = MATERIAL_COUNT - EDITABLE_MATERIAL_OFFSET;
-const char* materialLabels[MATERIAL_COUNT] = {
-    "Ground",
-    "Emitter Sphere",
-    "Glass Outer",
-    "Glass Inner",
-    "Metal Sphere",
-    "Diffuse Sphere"
-};
-const char* materialUniforms[MATERIAL_COUNT] = {
-    "material_ground",
-    "material_sphere_middle",
-    "material_sphere_left",
-    "material_inside_left",
-    "material_sphere_right",
-    "material_sphere_diffuse"
-};
-
-// Per-scene initial materials. Disney equivalents of the old type-based materials:
-//   metal  -> metallic=1, low roughness;  glass -> transmission=1, ior 1.5 (bubble 1/1.5).
-// Layout per row: baseColor, roughness, metallic, specular, specularTint,
-//                 transmission, ior, sheen, sheenTint, clearcoat, clearcoatGloss, emission.
-const DisneyMaterialParams initialDisneyMaterialsByScene[2][MATERIAL_COUNT] = {
-    // SCENE 0: small distant emitter (NEE wins)
-    {
-        { glm::vec3(0.8f, 0.8f, 0.0f), 0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // ground diffuse
-        { glm::vec3(0.0f),             0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(4.0f) },            // small emitter
-        { glm::vec3(0.8f, 0.8f, 0.8f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // glass
-        { glm::vec3(0.9f, 0.9f, 1.0f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 0.667f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // glass bubble (ior 1/1.5)
-        { glm::vec3(0.8f, 0.6f, 0.2f), 0.15f, 1.0f, 0.5f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.2f, 0.6f, glm::vec3(0.0f) },            // gold metal
-        { glm::vec3(0.7f, 0.2f, 0.2f), 0.6f,  0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) }             // red diffuse occluder
-    },
-    // SCENE 1: large close emitter (MIS wins)
-    {
-        { glm::vec3(0.8f, 0.8f, 0.0f), 0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // ground diffuse
-        { glm::vec3(0.0f),             0.65f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(2.0f, 1.9f, 1.6f) },// BIG emitter, close
-        { glm::vec3(0.9f, 0.9f, 0.9f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // glass
-        { glm::vec3(0.9f, 0.9f, 1.0f), 0.03f, 0.0f, 0.8f, 0.0f, 1.0f, 0.667f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },            // glass bubble
-        { glm::vec3(0.95f, 0.95f, 0.95f), 0.02f, 1.0f, 0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.2f, 0.6f, glm::vec3(0.0f) },           // near-mirror metal
-        { glm::vec3(0.7f, 0.2f, 0.2f), 0.6f,  0.0f, 0.4f, 0.0f, 0.0f, 1.5f,   0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) }             // red diffuse, lit by emitter
-    }
-};
-// Active editable copy, initialized from the chosen SCENE at startup.
-// Scenes 0/1 use this 6-slot machinery; scene 2 (the ladder) uses LadderScene below instead.
-// SCENE 2 has no entry here, so guard the index to avoid reading out of bounds.
-const DisneyMaterialParams* initialDisneyMaterials =
-    initialDisneyMaterialsByScene[SCENE < 2 ? SCENE : 0];
-DisneyMaterialParams disneyMaterials[MATERIAL_COUNT];
-
-// --- SCENE 2: roughness ladder ---------------------------------------------
-// Distinct from the 6-slot scheme above: 5 named materials drive 9 spheres, and the
-// five ladder spheres share one metal whose roughness is swept by ladderRoughness[].
-const int LADDER_COUNT = 5;
-const float initialLadderRoughness[LADDER_COUNT] = { 0.02f, 0.10f, 0.25f, 0.45f, 0.70f };
-
-struct LadderSceneParams {
-    DisneyMaterialParams ground;
-    DisneyMaterialParams ladder;        // shared metal; roughness overridden per slot at trace time
-    DisneyMaterialParams clearcoat;
-    DisneyMaterialParams emitterSmall;
-    DisneyMaterialParams emitterLarge;
-    float ladderRoughness[LADDER_COUNT];
-};
-
-// Initial ladder setup. Layout per DisneyMaterialParams row:
-//   baseColor, roughness, metallic, specular, specularTint,
-//   transmission, ior, sheen, sheenTint, clearcoat, clearcoatGloss, emission.
-const LadderSceneParams initialLadderScene = {
-    // ground — neutral gray diffuse so reflections/color bleed stay legible
-    { glm::vec3(0.5f, 0.5f, 0.5f), 0.8f, 0.0f, 0.3f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },
-    // ladder — shared warm-gold metal; .roughness is replaced per slot by ladderRoughness[]
-    { glm::vec3(0.9f, 0.85f, 0.75f), 0.1f, 1.0f, 0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.6f, glm::vec3(0.0f) },
-    // clearcoat — matte red base + sharp coat (two-lobe highlight a non-Disney model can't do)
-    { glm::vec3(0.6f, 0.05f, 0.05f), 0.5f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 1.0f, 0.9f, glm::vec3(0.0f) },
-    // small emitter — bright warm, small radius => NEE-favored
-    { glm::vec3(0.0f), 0.5f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(8.0f, 7.0f, 5.0f) },
-    // large emitter — dimmer cool, large radius => MIS-favored
-    { glm::vec3(0.0f), 0.5f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(1.8f, 1.9f, 2.2f) },
-    { 0.02f, 0.10f, 0.25f, 0.45f, 0.70f }
-};
-LadderSceneParams ladderScene;
 
 // Save Image to png file. press V key.
 // file name : date.png (created in bin folder)
@@ -456,43 +345,6 @@ void updatePanelMode(GLFWwindow* window) {
     glfwSetInputMode(window, GLFW_CURSOR, showMaterialPanel ? GLFW_CURSOR_NORMAL : GLFW_CURSOR_DISABLED);
     firstMouse = true;
     prevShowMaterialPanel = showMaterialPanel;
-}
-
-void uploadDisneyMaterial(Shader& shader, const char* uniformName, const DisneyMaterialParams& mat) {
-    std::string name(uniformName);
-    shader.setInt(name + ".material_type", 0);
-    shader.setVec3(name + ".albedo", mat.baseColor);
-    shader.setVec3(name + ".baseColor", mat.baseColor);
-    shader.setFloat(name + ".roughness", mat.roughness);
-    shader.setFloat(name + ".metallic", mat.metallic);
-    shader.setFloat(name + ".specular", mat.specular);
-    shader.setFloat(name + ".specularTint", mat.specularTint);
-    shader.setFloat(name + ".transmission", mat.transmission);
-    shader.setFloat(name + ".ior", mat.ior);
-    shader.setFloat(name + ".sheen", mat.sheen);
-    shader.setFloat(name + ".sheenTint", mat.sheenTint);
-    shader.setFloat(name + ".clearcoat", mat.clearcoat);
-    shader.setFloat(name + ".clearcoatGloss", mat.clearcoatGloss);
-    shader.setFloat(name + ".fuzz", mat.roughness);
-    shader.setVec3(name + ".emission", mat.emission);
-}
-
-void uploadDisneyMaterials(Shader& shader) {
-    for (int i = 0; i < MATERIAL_COUNT; i++) {
-        uploadDisneyMaterial(shader, materialUniforms[i], disneyMaterials[i]);
-    }
-}
-
-// Upload SCENE 2 (roughness ladder): 5 named materials + the per-slot roughness array.
-void uploadLadderMaterials(Shader& shader) {
-    uploadDisneyMaterial(shader, "material_ground", ladderScene.ground);
-    uploadDisneyMaterial(shader, "material_ladder", ladderScene.ladder);
-    uploadDisneyMaterial(shader, "material_clearcoat", ladderScene.clearcoat);
-    uploadDisneyMaterial(shader, "material_emitter_small", ladderScene.emitterSmall);
-    uploadDisneyMaterial(shader, "material_emitter_large", ladderScene.emitterLarge);
-    for (int i = 0; i < LADDER_COUNT; i++) {
-        shader.setFloat("ladderRoughness[" + std::to_string(i) + "]", ladderScene.ladderRoughness[i]);
-    }
 }
 
 // Full set of Disney sliders for one material. Returns true if any value changed.
