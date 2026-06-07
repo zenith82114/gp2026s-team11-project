@@ -12,6 +12,14 @@ vec3 colorStack[MAX_DEPTH];
 uniform sampler2D accumPrev;
 uniform int frameCountWithoutMove;
 uniform bool displayOnly;
+uniform int sampleMode; // 0: random, 1: Sobol, 2: Sobol with per-pixel scrambling
+uniform int randomSeedOffset; // extra offset for independent random runs
+
+uniform vec3 cameraPosition;
+uniform mat3 cameraToWorldRotMatrix;
+uniform float fovY; //set to 45
+uniform float H;
+uniform float W;
 
 struct Ray {
     vec3 origin;
@@ -80,9 +88,144 @@ float rand(vec2 co) {
   return fract(sin(dot(co.xy, vec2(12.9898,78.233))) * 43758.5453);
 }
 
+uint hashUint(uint x) {
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+uint owenScramble32(uint x, uint seed) {
+    uint y = 0u;
+    uint prefix = 0u;
+
+    for (int bit = 31; bit >= 0; --bit) {
+        uint shift = uint(bit);
+        uint inputBit = (x >> shift) & 1u;
+
+        uint h = hashUint(seed ^ prefix ^ uint(31 - bit) * 0x9e3779b9u);
+        uint flip = h & 1u;
+
+        uint outputBit = inputBit ^ flip;
+        y |= outputBit << shift;
+
+        prefix = (prefix << 1u) | inputBit;
+    }
+
+    return y;
+}
+
+// Reverse the bit order of a 32-bit unsigned integer (Van der Corput / bit reversal)
+uint bitReverse(uint v) {
+    v = ((v >> 1u) & 0x55555555u) | ((v & 0x55555555u) << 1u);
+    v = ((v >> 2u) & 0x33333333u) | ((v & 0x33333333u) << 2u);
+    v = ((v >> 4u) & 0x0f0f0f0fu) | ((v & 0x0f0f0f0fu) << 4u);
+    v = ((v >> 8u) & 0x00ff00ffu) | ((v & 0x00ff00ffu) << 8u);
+    v = (v >> 16u) | (v << 16u);
+    return v;
+}
+
+// 2D Sobol (VdC-based for the first two dimensions).
+// Uses bit-reversal (radical inverse base-2) for dimension X and
+// the Gray-coded index for dimension Y to produce low-discrepancy 2D samples.
+uvec2 sobol2D(uint index) {
+    uint ix = bitReverse(index);
+    // Gray code for second dimension before reversing bits
+    uint gray = index ^ (index >> 1u);
+    uint iy = bitReverse(gray);
+    return uvec2(ix, iy);
+}
+
+vec2 sobolJitter(vec2 uv, uint sampleIndex) {
+    vec2 pixel = floor(uv * vec2(W, H));
+    uint pixelSeed = hashUint(uint(pixel.x) ^ (uint(pixel.y) << 16u) ^ 0x9e3779b9u);
+    uvec2 sampleValue = sobol2D(sampleIndex);
+    if (sampleMode == 2) {
+        sampleValue.x = owenScramble32(sampleValue.x, pixelSeed ^ 0x1234567u);
+        sampleValue.y = owenScramble32(sampleValue.y, pixelSeed ^ 0x68bc21ebu);
+    }
+    // Convert 32-bit integer sample to float in [0,1)
+    vec2 samplePoint = vec2(sampleValue) * 2.3283064365386963e-10; // 1/2^32
+    return uv + (samplePoint - vec2(0.5)) / vec2(W, H);
+}
+
+vec2 randomJitter(vec2 uv, uint sampleIndex) {
+    vec2 pixel = floor(uv * vec2(W, H));
+    vec2 seed = pixel + vec2(float(sampleIndex), float(frameCountWithoutMove) * 17.0);
+    vec2 jitter = vec2(rand(seed), rand(seed + 19.19));
+    return uv + (jitter - vec2(0.5)) / vec2(W, H);
+}
+
+vec2 random2D(vec2 uv, uint sampleIndex, uint dim) {
+    vec2 pixel = floor(uv * vec2(W, H));
+    uint seed = hashUint(
+        uint(pixel.x) * 1973u ^
+        uint(pixel.y) * 9277u ^
+        sampleIndex * 26699u ^
+        dim * 0x9e3779b9u ^
+        uint(randomSeedOffset) * 0x85ebca6bu
+    );
+
+    float x = float(hashUint(seed)) * 2.3283064365386963e-10;
+    float y = float(hashUint(seed ^ 0x68bc21ebu)) * 2.3283064365386963e-10;
+    return vec2(x, y);
+}
+
+vec2 sample2D(vec2 uv, uint sampleIndex, uint dim) {
+    if (sampleMode == 0) {
+        return random2D(uv, sampleIndex, dim);
+    }
+
+    // Avoid Sobol sample 0. sobol2D(0) = (0, 0), which gives a corner-biased
+    // camera sample and degenerate BSDF samples when nsamples == 1.
+    uint index = sampleIndex + 1u;
+    uvec2 s = sobol2D(index);
+
+    vec2 pixel = floor(uv * vec2(W, H));
+    uint pixelSeed = hashUint(
+        uint(pixel.x) * 1973u ^
+        uint(pixel.y) * 9277u
+    );
+    uint dimSeed = hashUint(dim * 0x9e3779b9u + 0x243f6a88u);
+
+    if (sampleMode == 1) {
+        // Plain Sobol for the image-plane dimensions, but decorrelate later
+        // path dimensions per pixel.  Without this, every pixel makes the same
+        // reflection/refraction/diffuse choice each frame, causing coherent
+        // full-image flicker and ghosting.
+        if (dim != 0u) {
+            s.x ^= hashUint(pixelSeed ^ dimSeed ^ 0x1234567u);
+            s.y ^= hashUint(pixelSeed ^ dimSeed ^ 0x68bc21ebu);
+        }
+    }
+    else { // sampleMode == 2: per-pixel Owen-like scrambling
+        s.x = owenScramble32(s.x, pixelSeed ^ dimSeed ^ 0x1234567u);
+        s.y = owenScramble32(s.y, pixelSeed ^ dimSeed ^ 0x68bc21ebu);
+    }
+
+    return vec2(s) * 2.3283064365386963e-10;
+}
+
 vec3 rand_unit_vec3(vec2 seed) {
     vec3 r = vec3(rand(seed), rand(seed + 1.7), rand(seed + 3.3)) * 2.0 - 1.0;
     return normalize(r);
+}
+
+vec3 sampleHemisphereCosine(vec3 normal, vec2 u) {
+    float r = sqrt(u.x);
+    float theta = 6.28318530718 * u.y;
+
+    float x = r * cos(theta);
+    float y = r * sin(theta);
+    float z = sqrt(max(0.0, 1.0 - u.x));
+
+    vec3 up = abs(normal.z) < 0.999 ? vec3(0.0, 0.0, 1.0) : vec3(1.0, 0.0, 0.0);
+    vec3 tangent = normalize(cross(up, normal));
+    vec3 bitangent = cross(normal, tangent);
+
+    return normalize(tangent * x + bitangent * y + normal * z);
 }
 
 float max3 (vec3 v) {
@@ -90,25 +233,19 @@ float max3 (vec3 v) {
 }
 
 float min3 (vec3 v) {
-  return min (min (v.x, v.y), v.z);
+    return min (min (v.x, v.y), v.z);
 }
 
-
-uniform vec3 cameraPosition;
-uniform mat3 cameraToWorldRotMatrix;
-uniform float fovY; //set to 45
-uniform float H;
-uniform float W;
-
-Ray getRay(vec2 uv, int sampleId) {
-    // TODO
+Ray getRay(vec2 uv, uint sampleIndex) {
     float halfH = tan(fovY * 0.5);
     float halfW = (W / H) * halfH;
-    vec2 ndc = 2.0 * uv - 1.0;
+
+    vec2 jitter = sample2D(uv, sampleIndex, 0u);
+    vec2 sampleUv = uv + (jitter - vec2(0.5)) / vec2(W, H);
+
+    vec2 ndc = 2.0 * sampleUv - 1.0;
     vec3 dirCam = vec3(ndc.x * halfW, ndc.y * halfH, -1.0);
     vec3 dirWorld = normalize(cameraToWorldRotMatrix * dirCam);
-    vec3 randNoise = rand_unit_vec3(ndc + float(sampleId) + 17.0 * float(frameCountWithoutMove));
-    dirWorld = normalize(dirWorld + 1e-4 * randNoise);
     return Ray(cameraPosition, dirWorld);
 }
 
@@ -164,7 +301,29 @@ vec3 skyColor(Ray ray) {
     return (1.0 - a) * vec3(1.0) + a * vec3(0.5, 0.7, 1.0);
 }
 
-vec3 castRay(Ray ray){
+
+vec3 stripeGroundAlbedo(vec3 p) {
+    // One-direction stripe pattern for the ground.
+    // The color varies only with x, so the stripes run parallel to the z-axis.
+    // Increase this value to 120.0 or 160.0 if the difference is still subtle.
+    float scale = 100.0;
+    float stripe = mod(floor(p.x * scale), 2.0);
+    return mix(vec3(0.03), vec3(0.95), stripe);
+}
+
+vec3 surfaceAlbedo(HitRecord hit) {
+    vec3 albedo = hit.mat.albedo;
+
+    // The ground is implemented as a large sphere centered at y = -100.5
+    // with radius 100, so visible ground hit points are near y = -0.5.
+    if (hit.mat.material_type == mat_diffuse && hit.p.y < -0.45) {
+        albedo = stripeGroundAlbedo(hit.p);
+    }
+
+    return albedo;
+}
+
+vec3 castRay(Ray ray, uint sampleIndex){
     // TODO
     Ray r = ray;
     int depth = 0;
@@ -178,15 +337,16 @@ vec3 castRay(Ray ray){
         }
 
         if (hit.mat.material_type == mat_diffuse) {
-            vec2 seed = hit.p.xy + hit.p.zz + vec2(float(i)) + 0.131 * float(frameCountWithoutMove);
-            vec3 dir = normalize(hit.normal + rand_unit_vec3(seed));
-            colorStack[depth++] = hit.mat.albedo;
+            vec2 u = sample2D(TexCoords, sampleIndex, 1u + uint(i));
+            vec3 dir = sampleHemisphereCosine(hit.normal, u);
+            colorStack[depth++] = surfaceAlbedo(hit);
             r = Ray(hit.p + bias * hit.normal, dir);
         }
         else if (hit.mat.material_type == mat_reflective) {
             vec3 reflected = reflect(normalize(r.direction), hit.normal);
-            vec2 seed = hit.p.xy + hit.p.zz + vec2(float(i) + 0.5) + 13.37 * float(frameCountWithoutMove);
-            vec3 dir = normalize(reflected + hit.mat.fuzz * rand_unit_vec3(seed));
+            vec2 u = sample2D(TexCoords, sampleIndex, 20u + uint(i));
+            vec3 fuzzDir = sampleHemisphereCosine(hit.normal, u);
+            vec3 dir = normalize(reflected + hit.mat.fuzz * fuzzDir);
             if (dot(dir, hit.normal) <= 0.0) {
                 envColor = vec3(0);
                 break;
@@ -197,17 +357,18 @@ vec3 castRay(Ray ray){
         else { // refractive
             // assume one of the two adjacent media is always air (IOR = 1)
             float iorRatio = hit.frontFace ? (1.0 / hit.mat.ior) : hit.mat.ior;
-            float cosTheta = min(dot(-r.direction, hit.normal), 1.0);
-            float sinTheta = sqrt(1.0 - cosTheta * cosTheta);
+            vec3 unitDir = normalize(r.direction);
+            float cosTheta = min(dot(-unitDir, hit.normal), 1.0);
+            float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
 
-            vec2 seed = hit.p.xy + hit.p.zz + vec2(float(i) + 1.3) + 4.7 * float(frameCountWithoutMove);
+            vec2 u = sample2D(TexCoords, sampleIndex, 40u + uint(i));
             vec3 dir;
             vec3 offsetN;
-            if (iorRatio * sinTheta > 1.0 || rand(seed) < schlick(cosTheta, hit.mat.ior)) {
-                dir = reflect(r.direction, hit.normal);
+            if (iorRatio * sinTheta > 1.0 || u.x < schlick(cosTheta, hit.mat.ior)) {
+                dir = reflect(unitDir, hit.normal);
                 offsetN = hit.normal;
             } else {
-                dir = refract(r.direction, hit.normal, iorRatio);
+                dir = refract(unitDir, hit.normal, iorRatio);
                 offsetN = -hit.normal;
             }
             colorStack[depth++] = hit.mat.albedo;
@@ -231,11 +392,12 @@ void main()
     }
 
     // TODO
-    const int nsamples = 8;
+    const int nsamples = 1;
     vec3 color = vec3(0);
+    uint sampleBase = uint(frameCountWithoutMove) * uint(nsamples);
     for (int i = 0; i < nsamples; i++) {
-        Ray r = getRay(TexCoords, i);
-        color += castRay(r);
+        Ray r = getRay(TexCoords, sampleBase + uint(i));
+        color += castRay(r, sampleBase + uint(i));
     }
     color /= nsamples;
 
