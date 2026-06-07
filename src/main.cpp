@@ -32,6 +32,7 @@ void initAccumTargets(int width, int height);
 void resizeAccumTargets(int width, int height);
 void updatePanelMode(GLFWwindow* window);
 void uploadDisneyMaterials(Shader& shader);
+void uploadLadderMaterials(Shader& shader);
 bool drawMaterialPanel();
 
 bool isWindowed = true;
@@ -56,7 +57,7 @@ bool firstMouse = true;
 // timing
 float deltaTime = 1.0f / 60.0f;	// time between current frame and last frame
 float lastFrame = 0.0f;
-const int MAX_FRAME_COUNT_WITHOUT_MOVE = 4; // cap accumulation for equal-sample experiments
+const int MAX_FRAME_COUNT_WITHOUT_MOVE = 16; // cap accumulation for equal-sample experiments
 int frameCountWithoutMove = 0;
 
 // render mode, switched at runtime with keys 0/1/2
@@ -66,9 +67,11 @@ int renderMode = 2;
 // validation scene ID (compile-time; rebuild to switch)
 //   0: small distant emitter — NEE wins
 //   1: large close emitter    — MIS wins
-const int SCENE = 0;
+//   2: roughness ladder        — both NEE/MIS and the Disney roughness sweep in one frame
+const int SCENE = 2;
 const int SCENE_SMALL_EMITTER = 0;
 const int SCENE_LARGE_EMITTER = 1;
+const int SCENE_ROUGHNESS_LADDER = 2;
 
 // Optional accumulation targets for Figure 1(h).
 unsigned int accumFBO = 0;
@@ -136,8 +139,44 @@ const DisneyMaterialParams initialDisneyMaterialsByScene[2][MATERIAL_COUNT] = {
     }
 };
 // Active editable copy, initialized from the chosen SCENE at startup.
-const DisneyMaterialParams* initialDisneyMaterials = initialDisneyMaterialsByScene[SCENE];
+// Scenes 0/1 use this 6-slot machinery; scene 2 (the ladder) uses LadderScene below instead.
+// SCENE 2 has no entry here, so guard the index to avoid reading out of bounds.
+const DisneyMaterialParams* initialDisneyMaterials =
+    initialDisneyMaterialsByScene[SCENE < 2 ? SCENE : 0];
 DisneyMaterialParams disneyMaterials[MATERIAL_COUNT];
+
+// --- SCENE 2: roughness ladder ---------------------------------------------
+// Distinct from the 6-slot scheme above: 5 named materials drive 9 spheres, and the
+// five ladder spheres share one metal whose roughness is swept by ladderRoughness[].
+const int LADDER_COUNT = 5;
+const float initialLadderRoughness[LADDER_COUNT] = { 0.02f, 0.10f, 0.25f, 0.45f, 0.70f };
+
+struct LadderSceneParams {
+    DisneyMaterialParams ground;
+    DisneyMaterialParams ladder;        // shared metal; roughness overridden per slot at trace time
+    DisneyMaterialParams clearcoat;
+    DisneyMaterialParams emitterSmall;
+    DisneyMaterialParams emitterLarge;
+    float ladderRoughness[LADDER_COUNT];
+};
+
+// Initial ladder setup. Layout per DisneyMaterialParams row:
+//   baseColor, roughness, metallic, specular, specularTint,
+//   transmission, ior, sheen, sheenTint, clearcoat, clearcoatGloss, emission.
+const LadderSceneParams initialLadderScene = {
+    // ground — neutral gray diffuse so reflections/color bleed stay legible
+    { glm::vec3(0.5f, 0.5f, 0.5f), 0.8f, 0.0f, 0.3f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(0.0f) },
+    // ladder — shared warm-gold metal; .roughness is replaced per slot by ladderRoughness[]
+    { glm::vec3(0.9f, 0.85f, 0.75f), 0.1f, 1.0f, 0.5f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.6f, glm::vec3(0.0f) },
+    // clearcoat — matte red base + sharp coat (two-lobe highlight a non-Disney model can't do)
+    { glm::vec3(0.6f, 0.05f, 0.05f), 0.5f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 1.0f, 0.9f, glm::vec3(0.0f) },
+    // small emitter — bright warm, small radius => NEE-favored
+    { glm::vec3(0.0f), 0.5f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(8.0f, 7.0f, 5.0f) },
+    // large emitter — dimmer cool, large radius => MIS-favored
+    { glm::vec3(0.0f), 0.5f, 0.0f, 0.4f, 0.0f, 0.0f, 1.5f, 0.0f, 0.5f, 0.0f, 0.5f, glm::vec3(1.8f, 1.9f, 2.2f) },
+    { 0.02f, 0.10f, 0.25f, 0.45f, 0.70f }
+};
+LadderSceneParams ladderScene;
 
 // Save Image to png file. press V key.
 // file name : date.png (created in bin folder)
@@ -164,8 +203,12 @@ void saveImage(const char* filename) {
 
 int main()
 {
-    for (int i = 0; i < MATERIAL_COUNT; i++) {
-        disneyMaterials[i] = initialDisneyMaterials[i];
+    if (SCENE == SCENE_ROUGHNESS_LADDER) {
+        ladderScene = initialLadderScene;
+    } else {
+        for (int i = 0; i < MATERIAL_COUNT; i++) {
+            disneyMaterials[i] = initialDisneyMaterials[i];
+        }
     }
 
     // glfw: initialize and configure
@@ -261,7 +304,11 @@ int main()
 
     rayTracingShader.setInt("SCENE", SCENE);
 
-    uploadDisneyMaterials(rayTracingShader);
+    if (SCENE == SCENE_ROUGHNESS_LADDER) {
+        uploadLadderMaterials(rayTracingShader);
+    } else {
+        uploadDisneyMaterials(rayTracingShader);
+    }
 
     glm::mat4 viewMatBefore = camera.GetViewMatrix();
     float zoomBefore = camera.Zoom;
@@ -283,7 +330,11 @@ int main()
 
         if (materialChanged) {
             rayTracingShader.use();
-            uploadDisneyMaterials(rayTracingShader);
+            if (SCENE == SCENE_ROUGHNESS_LADDER) {
+                uploadLadderMaterials(rayTracingShader);
+            } else {
+                uploadDisneyMaterials(rayTracingShader);
+            }
             frameCountWithoutMove = 0;
         }
 
@@ -432,6 +483,101 @@ void uploadDisneyMaterials(Shader& shader) {
     }
 }
 
+// Upload SCENE 2 (roughness ladder): 5 named materials + the per-slot roughness array.
+void uploadLadderMaterials(Shader& shader) {
+    uploadDisneyMaterial(shader, "material_ground", ladderScene.ground);
+    uploadDisneyMaterial(shader, "material_ladder", ladderScene.ladder);
+    uploadDisneyMaterial(shader, "material_clearcoat", ladderScene.clearcoat);
+    uploadDisneyMaterial(shader, "material_emitter_small", ladderScene.emitterSmall);
+    uploadDisneyMaterial(shader, "material_emitter_large", ladderScene.emitterLarge);
+    for (int i = 0; i < LADDER_COUNT; i++) {
+        shader.setFloat("ladderRoughness[" + std::to_string(i) + "]", ladderScene.ladderRoughness[i]);
+    }
+}
+
+// Full set of Disney sliders for one material. Returns true if any value changed.
+bool drawMaterialSliders(DisneyMaterialParams& mat) {
+    bool changed = false;
+    changed |= ImGui::ColorEdit3("Base Color", &mat.baseColor[0]);
+    changed |= ImGui::SliderFloat("Roughness", &mat.roughness, 0.001f, 1.0f);
+    changed |= ImGui::SliderFloat("Metallic", &mat.metallic, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Specular", &mat.specular, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Specular Tint", &mat.specularTint, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Transmission", &mat.transmission, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("IOR", &mat.ior, 0.2f, 2.5f);
+    changed |= ImGui::SliderFloat("Sheen", &mat.sheen, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Sheen Tint", &mat.sheenTint, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Clearcoat", &mat.clearcoat, 0.0f, 1.0f);
+    changed |= ImGui::SliderFloat("Clearcoat Gloss", &mat.clearcoatGloss, 0.0f, 1.0f);
+    // Emission can exceed 1.0 (HDR); edit color and intensity separately for usability.
+    changed |= ImGui::ColorEdit3("Emission", &mat.emission[0], ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
+    return changed;
+}
+
+void drawPanelFooter() {
+    ImGui::Separator();
+    const char* modeNames[3] = { "BSDF-only", "NEE-only", "NEE+MIS" };
+    ImGui::Text("Render mode: %s   (keys 0/1/2)", modeNames[renderMode]);
+    ImGui::Text("Scene: %d   (compile-time)", SCENE);
+    ImGui::Text("M: toggle panel");
+}
+
+// Scenes 0/1: the original 6-slot named-material editor.
+bool drawDefaultMaterialPanel() {
+    bool changed = false;
+    ImGui::Combo("Material", &selectedEditableMaterial, materialLabels + EDITABLE_MATERIAL_OFFSET, EDITABLE_MATERIAL_COUNT);
+
+    int materialIndex = selectedEditableMaterial + EDITABLE_MATERIAL_OFFSET;
+    changed |= drawMaterialSliders(disneyMaterials[materialIndex]);
+
+    if (ImGui::Button("Reset Material")) {
+        disneyMaterials[materialIndex] = initialDisneyMaterials[materialIndex];
+        changed = true;
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("Reset All")) {
+        for (int i = EDITABLE_MATERIAL_OFFSET; i < MATERIAL_COUNT; i++) {
+            disneyMaterials[i] = initialDisneyMaterials[i];
+        }
+        changed = true;
+    }
+    drawPanelFooter();
+    return changed;
+}
+
+// SCENE 2: edit the 5 named ladder materials + a dedicated roughness-sweep group.
+bool drawLadderMaterialPanel() {
+    bool changed = false;
+
+    // The five editable materials (ground is non-emissive but tunable here too).
+    const char* ladderMatLabels[5] = { "Ground", "Ladder Metal", "Clearcoat", "Emitter (small)", "Emitter (large)" };
+    DisneyMaterialParams* ladderMats[5] = {
+        &ladderScene.ground, &ladderScene.ladder, &ladderScene.clearcoat,
+        &ladderScene.emitterSmall, &ladderScene.emitterLarge
+    };
+    ImGui::Combo("Material", &selectedEditableMaterial, ladderMatLabels, 5);
+    int idx = selectedEditableMaterial < 0 ? 0 : (selectedEditableMaterial > 4 ? 4 : selectedEditableMaterial);
+    changed |= drawMaterialSliders(*ladderMats[idx]);
+    if (idx == 1) {
+        ImGui::TextDisabled("(Ladder roughness is overridden per slot below)");
+    }
+
+    ImGui::Separator();
+    ImGui::Text("Ladder roughness (L0 sharp -> L4 matte)");
+    for (int i = 0; i < LADDER_COUNT; i++) {
+        std::string label = "L" + std::to_string(i);
+        changed |= ImGui::SliderFloat(label.c_str(), &ladderScene.ladderRoughness[i], 0.001f, 1.0f);
+    }
+
+    ImGui::Separator();
+    if (ImGui::Button("Reset Scene")) {
+        ladderScene = initialLadderScene;
+        changed = true;
+    }
+    drawPanelFooter();
+    return changed;
+}
+
 bool drawMaterialPanel() {
     if (!showMaterialPanel) {
         return false;
@@ -440,40 +586,11 @@ bool drawMaterialPanel() {
     bool changed = false;
     ImGui::SetNextWindowSize(ImVec2(360.0f, 0.0f), ImGuiCond_FirstUseEver);
     if (ImGui::Begin("Disney BSDF", &showMaterialPanel)) {
-        ImGui::Combo("Material", &selectedEditableMaterial, materialLabels + EDITABLE_MATERIAL_OFFSET, EDITABLE_MATERIAL_COUNT);
-
-        int materialIndex = selectedEditableMaterial + EDITABLE_MATERIAL_OFFSET;
-        DisneyMaterialParams& mat = disneyMaterials[materialIndex];
-        changed |= ImGui::ColorEdit3("Base Color", &mat.baseColor[0]);
-        changed |= ImGui::SliderFloat("Roughness", &mat.roughness, 0.001f, 1.0f);
-        changed |= ImGui::SliderFloat("Metallic", &mat.metallic, 0.0f, 1.0f);
-        changed |= ImGui::SliderFloat("Specular", &mat.specular, 0.0f, 1.0f);
-        changed |= ImGui::SliderFloat("Specular Tint", &mat.specularTint, 0.0f, 1.0f);
-        changed |= ImGui::SliderFloat("Transmission", &mat.transmission, 0.0f, 1.0f);
-        changed |= ImGui::SliderFloat("IOR", &mat.ior, 0.2f, 2.5f);
-        changed |= ImGui::SliderFloat("Sheen", &mat.sheen, 0.0f, 1.0f);
-        changed |= ImGui::SliderFloat("Sheen Tint", &mat.sheenTint, 0.0f, 1.0f);
-        changed |= ImGui::SliderFloat("Clearcoat", &mat.clearcoat, 0.0f, 1.0f);
-        changed |= ImGui::SliderFloat("Clearcoat Gloss", &mat.clearcoatGloss, 0.0f, 1.0f);
-        // Emission can exceed 1.0 (HDR); edit color and intensity separately for usability.
-        changed |= ImGui::ColorEdit3("Emission", &mat.emission[0], ImGuiColorEditFlags_HDR | ImGuiColorEditFlags_Float);
-
-        if (ImGui::Button("Reset Material")) {
-            mat = initialDisneyMaterials[materialIndex];
-            changed = true;
+        if (SCENE == SCENE_ROUGHNESS_LADDER) {
+            changed = drawLadderMaterialPanel();
+        } else {
+            changed = drawDefaultMaterialPanel();
         }
-        ImGui::SameLine();
-        if (ImGui::Button("Reset All")) {
-            for (int i = EDITABLE_MATERIAL_OFFSET; i < MATERIAL_COUNT; i++) {
-                disneyMaterials[i] = initialDisneyMaterials[i];
-            }
-            changed = true;
-        }
-        ImGui::Separator();
-        const char* modeNames[3] = { "BSDF-only", "NEE-only", "NEE+MIS" };
-        ImGui::Text("Render mode: %s   (keys 0/1/2)", modeNames[renderMode]);
-        ImGui::Text("Scene: %d   (compile-time)", SCENE);
-        ImGui::Text("M: toggle panel");
     }
     ImGui::End();
     return changed;

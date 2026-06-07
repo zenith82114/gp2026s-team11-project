@@ -87,21 +87,63 @@ uniform Material material_sphere_right;
 uniform Material material_inside_left;
 uniform Material material_sphere_diffuse;
 
+// Roughness-ladder scene (SCENE 2) materials.
+// The five ladder spheres share `material_ladder`; only roughness varies, per `ladderRoughness[i]`.
+const int NUM_LADDER = 5;
+uniform Material material_ladder;        // shared metal for the whole ladder
+uniform float ladderRoughness[NUM_LADDER]; // per-slot roughness override (the swept parameter)
+uniform Material material_clearcoat;     // colored base + sharp coat showcase
+uniform Material material_emitter_small; // small/bright warm light (NEE-favored)
+uniform Material material_emitter_large; // large/close cool light (MIS-favored)
+
 // Active validation scene, driven by `const int SCENE` in main.cpp.
 //   0: small distant emitter  — NEE wins
 //   1: large close emitter    — MIS wins
+//   2: roughness ladder        — both features in one frame
 uniform int SCENE;
-const int scene_small_emitter = 0;
-const int scene_large_emitter = 1;
+const int scene_small_emitter    = 0;
+const int scene_large_emitter    = 1;
+const int scene_roughness_ladder = 2;
 
-const int NUM_SPHERES = 6;
+// SCENE 2 uses the most spheres: ground + 5 ladder + clearcoat + 2 emitters = 9.
+const int NUM_SPHERES = 9;
 Sphere spheres[NUM_SPHERES];
 
 // Populate the global `spheres[]` for the active SCENE. Call once before tracing.
 // Slot-to-material mapping is kept identical across scenes so main.cpp can reuse the same uniform names;
 // only centers/radii (and the chosen materials) differ.
+// A degenerate, far-away non-emissive sphere used to pad unused slots so that
+// scenes using fewer than NUM_SPHERES don't trace undefined geometry.
+// radius 0 => no real intersection; trace()/directLight() skip it harmlessly.
+Sphere nullSphere() {
+    return Sphere(vec3(0.0, -1e6, 0.0), 0.0, material_ground);
+}
+
 void setupScene() {
-    if (SCENE == scene_large_emitter) {
+    // Default every slot to a harmless null sphere; each scene overwrites the slots it uses.
+    for (int i = 0; i < NUM_SPHERES; i++) {
+        spheres[i] = nullSphere();
+    }
+
+    if (SCENE == scene_roughness_ladder) {
+        // Veach-style roughness ladder: a row of metal spheres whose roughness climbs from
+        // near-mirror to matte, facing two emitters of different size. Across the row, no single
+        // sampling strategy (BSDF vs. NEE) stays clean — that's the MIS demonstration — and the
+        // row itself is a direct Disney GGX roughness sweep.
+        spheres[0] = Sphere(vec3(0,-100.5,-1), 100, material_ground);          // neutral diffuse ground
+
+        // Ladder L0..L4: shared metal, only roughness varies per slot.
+        for (int i = 0; i < NUM_LADDER; i++) {
+            Material m = material_ladder;
+            m.roughness = ladderRoughness[i];
+            float x = -2.0 + float(i) * 1.0; // -2, -1, 0, 1, 2
+            spheres[1 + i] = Sphere(vec3(x, -0.1, -1.2), 0.4, m);
+        }
+
+        spheres[6] = Sphere(vec3(0.0, -0.1, -0.3), 0.4, material_clearcoat);   // clearcoat showcase, up front
+        spheres[7] = Sphere(vec3(-1.5, 1.6, 0.3), 0.15, material_emitter_small); // small bright warm light
+        spheres[8] = Sphere(vec3(1.6, 1.4, 0.5), 0.6, material_emitter_large);   // large dim cool light
+    } else if (SCENE == scene_large_emitter) {
         // Large emitter close to the diffuse + metal spheres, subtending a wide cone.
         spheres[0] = Sphere(vec3(0,-100.5,-1), 100,  material_ground);         // ground, diffuse
         spheres[1] = Sphere(vec3(-0.9,1.1,-1.2), 0.9, material_sphere_middle); // BIG emitter, close
