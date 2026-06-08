@@ -8,7 +8,7 @@ in vec2 TexCoords;
 const int MAX_DEPTH = 10; // maximum bounce
 const float PI = 3.14159265359;
 
-const int RAYS_PER_FRAME_PIXEL = 4;
+const int RAYS_PER_FRAME_PIXEL = 1;
 
 // Render mode selector for NEE/MIS validation (set at runtime from main.cpp; keys 0/1/2)
 //   0: BSDF-only      — pure path tracer, lit only by BSDF rays hitting emitters / sky
@@ -23,6 +23,29 @@ const int mode_full      = 2;
 uniform sampler2D accumPrev;
 uniform int frameCountWithoutMove;
 uniform bool displayOnly;
+
+// Sampler selection (set from main.cpp). The integrator routes every random-number
+// consumer through sample2D(), which honors these so the three strategies can be
+// compared on the exact same scene/render mode.
+//   0: hashed pseudo-random   1: 2D Sobol   2: per-pixel Owen-scrambled Sobol
+uniform int sampleMode;
+uniform int randomSeedOffset; // extra decorrelation offset for independent random runs
+
+// Camera/viewport uniforms (hoisted above the sampling machinery: sample2D() reads W/H).
+uniform vec3 cameraPosition;
+uniform mat3 cameraToWorldRotMatrix;
+uniform float fovY; //set to 45
+uniform float H;
+uniform float W;
+
+// Sobol dimension allocation. Each distinct random-number consumer gets a stable,
+// collision-free dimension index so the low-discrepancy structure is consistent
+// across frames. Renumbering these silently changes the sampling pattern.
+const uint DIM_CAMERA      = 0u;   // primary-ray (image-plane) jitter
+const uint DIM_BSDF_BASE   = 1u;   // per-bounce BSDF samples start here
+const uint DIM_BSDF_STRIDE = 2u;   // per bounce: lobe-pick (call 0) + in-lobe 2D (call 1)
+const uint DIM_NEE_BASE    = 64u;  // NEE band, clear of the BSDF band [1,20]
+const uint DIM_NEE_STRIDE  = 16u;  // per bounce: room for every sphere-slot light index (<NUM_SPHERES)
 
 struct Ray {
     vec3 origin;
@@ -169,9 +192,104 @@ float rand(vec2 co) {
   return fract(sin(dot(co.xy, vec2(12.9898,78.233))) * 43758.5453);
 }
 
-vec3 rand_unit_vec3(vec2 seed) {
-    vec3 r = vec3(rand(seed), rand(seed + 1.7), rand(seed + 3.3)) * 2.0 - 1.0;
-    return normalize(r);
+// --- Low-discrepancy sampling machinery -----------------------------------
+// Ported from the sobol_perpixel experiment. sample2D() is the single entry
+// point: it returns a uniform [0,1)^2 sample for the requested (sampleIndex, dim),
+// so every downstream sampler keeps its existing distribution (and thus every
+// MIS pdf is preserved) regardless of sampleMode.
+uint hashUint(uint x) {
+    x ^= x >> 16u;
+    x *= 0x7feb352du;
+    x ^= x >> 15u;
+    x *= 0x846ca68bu;
+    x ^= x >> 16u;
+    return x;
+}
+
+uint owenScramble32(uint x, uint seed) {
+    uint y = 0u;
+    uint prefix = 0u;
+
+    for (int bit = 31; bit >= 0; --bit) {
+        uint shift = uint(bit);
+        uint inputBit = (x >> shift) & 1u;
+
+        uint h = hashUint(seed ^ prefix ^ uint(31 - bit) * 0x9e3779b9u);
+        uint flip = h & 1u;
+
+        uint outputBit = inputBit ^ flip;
+        y |= outputBit << shift;
+
+        prefix = (prefix << 1u) | inputBit;
+    }
+
+    return y;
+}
+
+// Reverse the bit order of a 32-bit unsigned integer (Van der Corput / bit reversal)
+uint bitReverse(uint v) {
+    v = ((v >> 1u) & 0x55555555u) | ((v & 0x55555555u) << 1u);
+    v = ((v >> 2u) & 0x33333333u) | ((v & 0x33333333u) << 2u);
+    v = ((v >> 4u) & 0x0f0f0f0fu) | ((v & 0x0f0f0f0fu) << 4u);
+    v = ((v >> 8u) & 0x00ff00ffu) | ((v & 0x00ff00ffu) << 8u);
+    v = (v >> 16u) | (v << 16u);
+    return v;
+}
+
+// 2D Sobol (VdC-based for the first two dimensions).
+uvec2 sobol2D(uint index) {
+    uint ix = bitReverse(index);
+    uint gray = index ^ (index >> 1u);
+    uint iy = bitReverse(gray);
+    return uvec2(ix, iy);
+}
+
+vec2 random2D(vec2 uv, uint sampleIndex, uint dim) {
+    vec2 pixel = floor(uv * vec2(W, H));
+    uint seed = hashUint(
+        uint(pixel.x) * 1973u ^
+        uint(pixel.y) * 9277u ^
+        sampleIndex * 26699u ^
+        dim * 0x9e3779b9u ^
+        uint(randomSeedOffset) * 0x85ebca6bu
+    );
+
+    float x = float(hashUint(seed)) * 2.3283064365386963e-10;
+    float y = float(hashUint(seed ^ 0x68bc21ebu)) * 2.3283064365386963e-10;
+    return vec2(x, y);
+}
+
+vec2 sample2D(vec2 uv, uint sampleIndex, uint dim) {
+    if (sampleMode == 0) {
+        return random2D(uv, sampleIndex, dim);
+    }
+
+    // Avoid Sobol sample 0. sobol2D(0) = (0, 0), which gives a corner-biased
+    // camera sample and degenerate BSDF samples when nsamples == 1.
+    uint index = sampleIndex + 1u;
+    uvec2 s = sobol2D(index);
+
+    vec2 pixel = floor(uv * vec2(W, H));
+    uint pixelSeed = hashUint(
+        uint(pixel.x) * 1973u ^
+        uint(pixel.y) * 9277u
+    );
+    uint dimSeed = hashUint(dim * 0x9e3779b9u + 0x243f6a88u);
+
+    if (sampleMode == 1) {
+        // Plain Sobol for the image-plane dimension, but decorrelate later path
+        // dimensions per pixel so every pixel doesn't make the same bounce choice.
+        if (dim != 0u) {
+            s.x ^= hashUint(pixelSeed ^ dimSeed ^ 0x1234567u);
+            s.y ^= hashUint(pixelSeed ^ dimSeed ^ 0x68bc21ebu);
+        }
+    }
+    else { // sampleMode == 2: per-pixel Owen-like scrambling
+        s.x = owenScramble32(s.x, pixelSeed ^ dimSeed ^ 0x1234567u);
+        s.y = owenScramble32(s.y, pixelSeed ^ dimSeed ^ 0x68bc21ebu);
+    }
+
+    return vec2(s) * 2.3283064365386963e-10;
 }
 
 float max3 (vec3 v) {
@@ -240,20 +358,16 @@ vec3 sampleGGX(vec2 u, float alpha, vec3 n) {
 }
 
 
-uniform vec3 cameraPosition;
-uniform mat3 cameraToWorldRotMatrix;
-uniform float fovY; //set to 45
-uniform float H;
-uniform float W;
-
-Ray getRay(vec2 uv, int sampleId) {
+Ray getRay(vec2 uv, uint sampleIndex) {
     float halfH = tan(fovY * 0.5);
     float halfW = (W / H) * halfH;
-    vec2 ndc = 2.0 * uv - 1.0;
+    // Jitter the image-plane sample within the pixel footprint (box filter AA),
+    // using the well-stratified first Sobol dimension.
+    vec2 j = sample2D(uv, sampleIndex, DIM_CAMERA);
+    vec2 sampleUv = uv + (j - vec2(0.5)) / vec2(W, H);
+    vec2 ndc = 2.0 * sampleUv - 1.0;
     vec3 dirCam = vec3(ndc.x * halfW, ndc.y * halfH, -1.0);
     vec3 dirWorld = normalize(cameraToWorldRotMatrix * dirCam);
-    vec3 randNoise = rand_unit_vec3(ndc + float(sampleId) + 17.0 * float(frameCountWithoutMove));
-    dirWorld = normalize(dirWorld + 1e-4 * randNoise);
     return Ray(cameraPosition, dirWorld);
 }
 
@@ -336,7 +450,7 @@ float spherePdfLight(Sphere sp, vec3 p, vec3 wi) {
 // Returns the (normalized) direction in `wi`, distance to the sampled point in `dist`,
 // and the solid-angle pdf in `pdf`.
 // pdf == 0 signals an invalid sample (i.e., p inside sphere).
-void sampleSphereLight(Sphere sp, vec3 p, vec2 seed, out vec3 wi, out float dist, out float pdf) {
+void sampleSphereLight(Sphere sp, vec3 p, vec2 uSample, out vec3 wi, out float dist, out float pdf) {
     vec3 wc = sp.center - p;
     float dc2 = dot(wc, wc);
     float dc = sqrt(dc2);
@@ -345,8 +459,8 @@ void sampleSphereLight(Sphere sp, vec3 p, vec2 seed, out vec3 wi, out float dist
 
     float cosThetaMax = sqrt(1.0 - r2 / dc2);
 
-    float r1 = rand(seed);
-    float r2u = rand(seed + 2.9);
+    float r1 = uSample.x;
+    float r2u = uSample.y;
     float cosTheta = 1.0 - r1 * (1.0 - cosThetaMax);
     float sinTheta = sqrt(max(0.0, 1.0 - cosTheta * cosTheta));
     float phi = 2.0 * PI * r2u;
@@ -547,20 +661,20 @@ BSDFSample sampleBSDF(Material mat, vec3 n, vec3 wo, bool frontFace, vec3 u) {
 // and accumulate the direct radiance.
 // Returns the direct-lighting contribution (NOT yet multiplied by path throughput).
 // Pure-delta lobes (transmission/specular fresnel) correctly receive zero direct estimate.
-vec3 directLight(HitRecord hit, vec3 wo, int bounce) {
+vec3 directLight(HitRecord hit, vec3 wo, int bounce, uint sampleIndex) {
     vec3 Ld = vec3(0.0);
 
     for (int i = 0; i < spheres.length(); i++) {
         Sphere light = spheres[i];
         if (light.mat.emission == vec3(0.0)) continue; // not a light
 
-        vec2 seed = hit.p.xy + hit.p.zz
-                  + vec2(float(bounce) + 7.0 * float(i) + 2.2)
-                  + 0.197 * float(frameCountWithoutMove);
+        // One 2D sample per (bounce, light-slot). The slot index `i` (< NUM_SPHERES)
+        // fits inside DIM_NEE_STRIDE so distinct lights never collide on a dimension.
+        vec2 u = sample2D(TexCoords, sampleIndex, DIM_NEE_BASE + DIM_NEE_STRIDE * uint(bounce) + uint(i));
 
         vec3 wi;
         float dist, pdfLight;
-        sampleSphereLight(light, hit.p, seed, wi, dist, pdfLight);
+        sampleSphereLight(light, hit.p, u, wi, dist, pdfLight);
         if (pdfLight <= 0.0) continue;
 
         float cosSurf = dot(hit.normal, wi);
@@ -587,7 +701,7 @@ vec3 directLight(HitRecord hit, vec3 wo, int bounce) {
     return Ld;
 }
 
-vec3 castRay(Ray ray){
+vec3 castRay(Ray ray, uint sampleIndex){
     Ray r = ray;
     vec3 throughput = vec3(1.0); // path throughput (product of f*cos/pdf so far)
     vec3 color = vec3(0.0);      // accumulated radiance L
@@ -640,15 +754,18 @@ vec3 castRay(Ray ray){
         // directLight() returns 0 for pure-delta materials (evalBSDF == 0 for generic wi),
         // so calling it unconditionally on every hit is safe
         if (RENDER_MODE != mode_bsdf_only) {
-            color += throughput * directLight(hit, wo, i);
+            color += throughput * directLight(hit, wo, i, sampleIndex);
             if (RENDER_MODE == mode_nee_only) {
                 break; // NEE-only: terminate after the direct estimate
             }
         }
 
         // --- BSDF sampling for the next bounce ---
-        vec2 seed = hit.p.xy + hit.p.zz + vec2(float(i) + 1.7) + 9.13 * float(frameCountWithoutMove);
-        vec3 u = vec3(rand(seed), rand(seed + 2.31), rand(seed + 5.97));
+        // Two sample2D calls so the lobe choice (u.x) and the in-lobe direction (u.yz)
+        // come from independent dimensions — required for the one-sample MIS pdf.
+        vec2 a = sample2D(TexCoords, sampleIndex, DIM_BSDF_BASE + DIM_BSDF_STRIDE * uint(i));
+        vec2 b = sample2D(TexCoords, sampleIndex, DIM_BSDF_BASE + DIM_BSDF_STRIDE * uint(i) + 1u);
+        vec3 u = vec3(a.x, b.x, b.y);
         BSDFSample sample = sampleBSDF(hit.mat, hit.normal, wo, hit.frontFace, u);
         if (!sample.valid) {
             break;
@@ -689,9 +806,11 @@ void main()
     setupScene(); // fill spheres[] for the active SCENE before any tracing
 
     vec3 color = vec3(0);
+    uint sampleBase = uint(frameCountWithoutMove) * uint(RAYS_PER_FRAME_PIXEL);
     for (int i = 0; i < RAYS_PER_FRAME_PIXEL; i++) {
-        Ray r = getRay(TexCoords, i);
-        color += castRay(r);
+        uint sampleIndex = sampleBase + uint(i);
+        Ray r = getRay(TexCoords, sampleIndex);
+        color += castRay(r, sampleIndex);
     }
     color /= RAYS_PER_FRAME_PIXEL;
 
