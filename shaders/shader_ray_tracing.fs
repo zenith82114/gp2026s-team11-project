@@ -344,7 +344,14 @@ vec3 cosineSampleHemisphere(vec2 u, vec3 n) {
 float D_GGX(float NoH, float alpha) {
     float a2 = alpha * alpha;
     float d = NoH * NoH * (a2 - 1.0) + 1.0;
-    return a2 / max(PI * d * d, 1e-6);
+    // Use additive epsilon, not max(..., 1e-6).
+    // for sharp lobes (small alpha, NoH~=1) the true PI*d*d is ~1e-12, well below 1e-6,
+    // so a max() floor collapses the peak to D ~= 1.
+    // That craters pdfBSDF for near-mirror reflections,
+    // which in turn drives the MIS power-heuristic weight on emitters seen through a sharp mirror
+    // to ~0 (emitters reflect as black spots).
+    // +1e-12 only guards the true singularity.
+    return a2 / (PI * d * d + 1e-12);
 }
 
 float smithG1_GGX(float NoV, float alpha) {
