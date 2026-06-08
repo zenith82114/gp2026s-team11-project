@@ -71,6 +71,10 @@ bool showMaterialPanel = false;
 bool prevShowMaterialPanel = false;
 int selectedEditableMaterial = 0;
 
+// Procedural floor stripes (toggled from the ImGui panel; uploaded as shader uniforms).
+bool enableFloorStripes = false;
+float floorStripeCount = 100.0f; // stripe density: dark/light pairs per world unit in x
+
 // setting
 const unsigned int SCR_WIDTH = 800;
 const unsigned int SCR_HEIGHT = 600;
@@ -260,6 +264,8 @@ int main()
     rayTracingShader.setInt("frameCountWithoutMove", 0);
     rayTracingShader.setInt("sampleMode", samplingMode);
     rayTracingShader.setInt("randomSeedOffset", 0);
+    rayTracingShader.setInt("enableFloorStripes", enableFloorStripes ? 1 : 0);
+    rayTracingShader.setFloat("floorStripeCount", floorStripeCount);
 
     rayTracingShader.setInt("SCENE", SCENE);
 
@@ -305,6 +311,8 @@ int main()
         glm::mat4 viewMatNow = camera.GetViewMatrix();
         rayTracingShader.setMat3("cameraToWorldRotMatrix", glm::transpose(glm::mat3(viewMatNow)));
         rayTracingShader.setInt("RENDER_MODE", renderMode);
+        rayTracingShader.setInt("enableFloorStripes", enableFloorStripes ? 1 : 0);
+        rayTracingShader.setFloat("floorStripeCount", floorStripeCount);
 
         // When a sweep is running, the active task dictates the sampler + seed offset.
         // Switching task mode restarts accumulation so each spp target is rendered clean.
@@ -515,7 +523,17 @@ void drawSamplerControls() {
     }
 }
 
-void drawPanelFooter() {
+// Returns true if a control here changed something that should restart accumulation.
+bool drawPanelFooter() {
+    bool changed = false;
+
+    ImGui::Separator();
+    ImGui::Text("Floor");
+    changed |= ImGui::Checkbox("Stripe pattern", &enableFloorStripes);
+    if (enableFloorStripes) {
+        changed |= ImGui::SliderFloat("Stripe density", &floorStripeCount, 4.0f, 600.0f, "%.0f");
+    }
+
     drawSamplerControls();
 
     ImGui::Separator();
@@ -523,6 +541,7 @@ void drawPanelFooter() {
     ImGui::Text("Render mode: %s   (keys 0/1/2)", modeNames[renderMode]);
     ImGui::Text("Scene: %d   (compile-time)", SCENE);
     ImGui::Text("M: toggle panel");
+    return changed;
 }
 
 // Scenes 0/1: the original 6-slot named-material editor.
@@ -544,7 +563,7 @@ bool drawDefaultMaterialPanel() {
         }
         changed = true;
     }
-    drawPanelFooter();
+    changed |= drawPanelFooter();
     return changed;
 }
 
@@ -577,7 +596,7 @@ bool drawLadderMaterialPanel() {
         ladderScene = initialLadderScene;
         changed = true;
     }
-    drawPanelFooter();
+    changed |= drawPanelFooter();
     return changed;
 }
 

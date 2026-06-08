@@ -101,6 +101,7 @@ struct Sphere {
     vec3 center;
     float radius;
     Material mat;
+    bool floorStripes; // procedural radial-stripe pattern applied to this sphere's surface
 };
 
 uniform Material material_ground;
@@ -128,6 +129,10 @@ const int scene_small_emitter    = 0;
 const int scene_large_emitter    = 1;
 const int scene_roughness_ladder = 2;
 
+// Procedural floor decoration (toggled from the ImGui panel).
+uniform bool enableFloorStripes;
+uniform float floorStripeCount;  // stripe density: dark/light pairs per world unit in x
+
 // SCENE 2 uses the most spheres: ground + 5 ladder + clearcoat + 2 emitters = 9.
 const int NUM_SPHERES = 9;
 Sphere spheres[NUM_SPHERES];
@@ -139,7 +144,7 @@ Sphere spheres[NUM_SPHERES];
 // scenes using fewer than NUM_SPHERES don't trace undefined geometry.
 // radius 0 => no real intersection; trace()/directLight() skip it harmlessly.
 Sphere nullSphere() {
-    return Sphere(vec3(0.0, -1e6, 0.0), 0.0, material_ground);
+    return Sphere(vec3(0.0, -1e6, 0.0), 0.0, material_ground, false);
 }
 
 void setupScene() {
@@ -153,35 +158,35 @@ void setupScene() {
         // near-mirror to matte, facing two emitters of different size. Across the row, no single
         // sampling strategy (BSDF vs. NEE) stays clean — that's the MIS demonstration — and the
         // row itself is a direct Disney GGX roughness sweep.
-        spheres[0] = Sphere(vec3(0,-100.5,-1), 100, material_ground);          // neutral diffuse ground
+        spheres[0] = Sphere(vec3(0,-100.5,-1), 100, material_ground, enableFloorStripes); // neutral diffuse ground
 
         // Ladder L0..L4: shared metal, only roughness varies per slot.
         for (int i = 0; i < NUM_LADDER; i++) {
             Material m = material_ladder;
             m.roughness = ladderRoughness[i];
             float x = -2.0 + float(i) * 1.0; // -2, -1, 0, 1, 2
-            spheres[1 + i] = Sphere(vec3(x, -0.1, -1.2), 0.4, m);
+            spheres[1 + i] = Sphere(vec3(x, -0.1, -1.2), 0.4, m, false);
         }
 
-        spheres[6] = Sphere(vec3(0.0, -0.1, -0.3), 0.4, material_clearcoat);   // clearcoat showcase, up front
-        spheres[7] = Sphere(vec3(-1.5, 1.6, 0.3), 0.15, material_emitter_small); // small bright warm light
-        spheres[8] = Sphere(vec3(1.6, 1.4, 0.5), 0.6, material_emitter_large);   // large dim cool light
+        spheres[6] = Sphere(vec3(0.0, -0.1, -0.3), 0.4, material_clearcoat, false);   // clearcoat showcase, up front
+        spheres[7] = Sphere(vec3(-1.5, 1.6, 0.3), 0.15, material_emitter_small, false); // small bright warm light
+        spheres[8] = Sphere(vec3(1.6, 1.4, 0.5), 0.6, material_emitter_large, false);   // large dim cool light
     } else if (SCENE == scene_large_emitter) {
         // Large emitter close to the diffuse + metal spheres, subtending a wide cone.
-        spheres[0] = Sphere(vec3(0,-100.5,-1), 100,  material_ground);         // ground, diffuse
-        spheres[1] = Sphere(vec3(-0.9,1.1,-1.2), 0.9, material_sphere_middle); // BIG emitter, close
-        spheres[2] = Sphere(vec3(-1.4,0,-0.2), 0.5, material_sphere_left);     // glass
-        spheres[3] = Sphere(vec3(-1.4,0,-0.2), 0.45, material_inside_left);    // glass bubble
-        spheres[4] = Sphere(vec3(1,0,-1), 0.5, material_sphere_right);         // near-mirror metal
-        spheres[5] = Sphere(vec3(0.1,0,-0.2), 0.5, material_sphere_diffuse);   // diffuse, lit by emitter
+        spheres[0] = Sphere(vec3(0,-100.5,-1), 100,  material_ground, enableFloorStripes); // ground, diffuse
+        spheres[1] = Sphere(vec3(-0.9,1.1,-1.2), 0.9, material_sphere_middle, false); // BIG emitter, close
+        spheres[2] = Sphere(vec3(-1.4,0,-0.2), 0.5, material_sphere_left, false);     // glass
+        spheres[3] = Sphere(vec3(-1.4,0,-0.2), 0.45, material_inside_left, false);    // glass bubble
+        spheres[4] = Sphere(vec3(1,0,-1), 0.5, material_sphere_right, false);         // near-mirror metal
+        spheres[5] = Sphere(vec3(0.1,0,-0.2), 0.5, material_sphere_diffuse, false);   // diffuse, lit by emitter
     } else {
         // Original small/distant emitter scene.
-        spheres[0] = Sphere(vec3(0,-100.5,-1), 100, material_ground);          // diffuse(Lambertian)
-        spheres[1] = Sphere(vec3(0,2,-1), 0.2, material_sphere_middle);        // small emitter
-        spheres[2] = Sphere(vec3(-1,0,-1), 0.5, material_sphere_left);         // refractive
-        spheres[3] = Sphere(vec3(-1,0,-1), 0.45, material_inside_left);        // refractive
-        spheres[4] = Sphere(vec3(1,0,-1), 0.5, material_sphere_right);         // reflective
-        spheres[5] = Sphere(vec3(-0.2,0,0), 0.5, material_sphere_diffuse);     // diffuse occluder
+        spheres[0] = Sphere(vec3(0,-100.5,-1), 100, material_ground, enableFloorStripes); // diffuse(Lambertian)
+        spheres[1] = Sphere(vec3(0,2,-1), 0.2, material_sphere_middle, false);        // small emitter
+        spheres[2] = Sphere(vec3(-1,0,-1), 0.5, material_sphere_left, false);         // refractive
+        spheres[3] = Sphere(vec3(-1,0,-1), 0.45, material_inside_left, false);        // refractive
+        spheres[4] = Sphere(vec3(1,0,-1), 0.5, material_sphere_right, false);         // reflective
+        spheres[5] = Sphere(vec3(-0.2,0,0), 0.5, material_sphere_diffuse, false);     // diffuse occluder
     }
 }
 
@@ -394,6 +399,21 @@ bool sphereIntersect(Sphere sp, Ray r, inout HitRecord hit){
     hit.frontFace = dot(r.direction, outwardNormal) < 0.0;
     hit.normal = hit.frontFace ? outwardNormal : -outwardNormal;
     hit.mat = sp.mat;
+
+    // Procedural parallel floor stripes
+    // - dark/light bands running along z (color varies only with x)
+    // - modulates the ground albedo only (geometry/normals untouched)
+    if (sp.floorStripes) {
+        float s = hit.p.x * floorStripeCount; // stripe coordinate (1 unit = half a pair)
+        // Soft square wave: smooth the band edges over ~one pixel of `s` to keep
+        // the running-mean accumulation from amplifying stripe-edge aliasing.
+        float aa = max(fwidth(s), 1e-4);
+        float tri = abs(fract(s * 0.5) - 0.5) * 2.0;       // 0..1 triangle, period = one pair
+        float stripe = smoothstep(0.5 - aa, 0.5 + aa, tri); // 0 = dark band, 1 = light band
+        vec3 dark = sp.mat.baseColor * 0.05;
+        hit.mat.baseColor = mix(dark, sp.mat.baseColor, stripe);
+        hit.mat.albedo = hit.mat.baseColor;
+    }
     return true;
 }
 
@@ -418,7 +438,7 @@ vec3 skyColor(Ray ray) {
     vec3 dir = normalize(ray.direction);
     float a = 0.5 * (dir.y + 1.0);
     // Dimmed so the emissive spheres dominate the lighting (NEE/MIS validation needs a dark env).
-    return 0.01 * ((1.0 - a) * vec3(1.0) + a * vec3(0.5, 0.7, 1.0));
+    return 0.1 * ((1.0 - a) * vec3(1.0) + a * vec3(0.5, 0.7, 1.0));
 }
 
 // Build an orthonormal basis whose +z axis is w (Duff et al. 2017, branchless).
